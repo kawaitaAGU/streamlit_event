@@ -1,78 +1,119 @@
-# streamlit_triangles.py
-import streamlit as st
+# streamlit_app.py
+import base64
+from io import BytesIO
 from PIL import Image
-import base64, io, mimetypes
+import streamlit as st
+import streamlit.components.v1 as components
 
-st.set_page_config(page_title="📸 背景画像＋三角ドラッグ（Streamlit）", layout="wide")
+st.set_page_config(page_title="背景＋ドラッグ三角（Streamlit）", layout="wide")
 
-st.title("📸 背景画像＋ドラッグ三角（iPhone OK / Streamlit）")
+st.title("📷 背景に写真を貼って、三角をドラッグ（iPhone対応版）")
 
-# ------------------ 画像の入力（カメラ or ファイル） ------------------
-col1, col2 = st.columns(2)
-with col1:
-    cam = st.camera_input("カメラで撮影（iPhone対応）")
-with col2:
-    up = st.file_uploader("画像をアップロード（JPEG/PNG/WebP/GIF）", type=["jpg","jpeg","png","webp","gif"])
+st.caption("上で写真を撮影 / 画像を選択 → 下のキャンバスに反映されます（iPhone対応: フェード表示 & HEIC対策）。")
 
-def file_to_data_url(uploaded_file) -> str | None:
-    if uploaded_file is None:
-        return None
-    # そのまま bytes 取得
-    data = uploaded_file.read()
-    # MIME 推定
-    mime = getattr(uploaded_file, "type", None)
-    if not mime:
-        mime, _ = mimetypes.guess_type(uploaded_file.name or "")
-        if mime is None:
-            # PIL でフォールバック
-            try:
-                im = Image.open(io.BytesIO(data))
-                fmt = (im.format or "JPEG").lower()
-                mime = f"image/{'jpeg' if fmt == 'jpg' else fmt}"
-            except Exception:
-                mime = "image/jpeg"
-    b64 = base64.b64encode(data).decode("ascii")
+# ------------------------------
+# 画像を dataURL(base64) に変換
+# ------------------------------
+def pil_to_data_url(pil_img: Image.Image, fmt: str = "JPEG", quality=92) -> str:
+    buf = BytesIO()
+    # iPhoneのHEICなどを含め、最終的にJPEG/WebP/PNGに正規化するのが安定
+    if fmt.upper() == "JPEG":
+        pil_img = pil_img.convert("RGB")
+        pil_img.save(buf, format="JPEG", quality=quality, optimize=True)
+        mime = "image/jpeg"
+    elif fmt.upper() == "WEBP":
+        pil_img.save(buf, format="WEBP", quality=quality, method=6)
+        mime = "image/webp"
+    else:
+        pil_img.save(buf, format="PNG")
+        mime = "image/png"
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
     return f"data:{mime};base64,{b64}"
 
-# camera > uploader の優先順
-src_data_url = file_to_data_url(cam) or file_to_data_url(up)
+# ------------------------------
+# 画像入力（撮影 / アップロード）
+# ------------------------------
+col1, col2 = st.columns(2)
+with col1:
+    cam = st.camera_input("📸 ここで撮影（iPhoneでもOK）", label_visibility="visible")
+with col2:
+    up = st.file_uploader("🖼️ 画像を選択（JPEG/PNG/WEBP/HEIC可）", type=["jpg", "jpeg", "png", "webp", "heic", "heif"])
 
-if src_data_url:
-    st.success("✅ 背景画像を受け取りました。アプリ領域に反映します。")
-else:
-    st.info("⬆️ カメラ撮影 または 画像アップロードを行うと背景に設定されます。")
+data_url = None
 
-# ------------------ 埋め込み HTML / JS（ドラッグ三角 & 座標表示） ------------------
-# iPhone でも安定するよう <img id="bgimg"> に data URL を入れて表示
-# 三角は CSS ボーダーで描画、Pointer Events でドラッグ
+# ファイルから PIL 読み込み（HEIC/HEIF は pillow-heif がある場合に扱える想定）
+def file_to_pil(file) -> Image.Image | None:
+    if file is None:
+        return None
+    try:
+        # まずPILで頑張って開く
+        img = Image.open(file)
+        img.load()
+        return img
+    except Exception:
+        # pillow-heif が入っていれば HEIC も読める
+        try:
+            import pillow_heif
+            file.seek(0)
+            heif = pillow_heif.read_heif(file.read())
+            img = Image.frombytes(
+                heif.mode, heif.size, heif.data, "raw"
+            )
+            return img
+        except Exception:
+            return None
+
+# 優先順位: camera_input -> uploader
+src_img = None
+if cam is not None:
+    # cam は UploadedFile （画像バイナリ）
+    src_img = file_to_pil(cam)
+elif up is not None:
+    src_img = file_to_pil(up)
+
+if src_img is not None:
+    # 画面に収めやすいように大きすぎる画像は縮小（iPhoneの超高解像度対策）
+    max_w = 1600
+    if src_img.width > max_w:
+        ratio = max_w / src_img.width
+        src_img = src_img.resize((max_w, int(src_img.height * ratio)))
+    # iPhoneでの発色/互換重視で JPEG に正規化
+    data_url = pil_to_data_url(src_img, fmt="JPEG", quality=92)
+
+# ---------------------------------------
+# HTML 側（ドラッグ三角 & 背景フェード表示）
+# ---------------------------------------
 html = f"""
-<!doctype html>
+<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8" />
 <style>
   html, body {{
-    margin: 0; padding: 0; height: 100%; background: #111; overflow: hidden;
+    margin: 0; height: 100%; overflow: hidden; background: #111;
   }}
-  /* 背景は <img> で全面に敷く（iOS 安定） */
+  /* 背景は常にDOMに存在させる（display:noneは使わない） */
   #bgimg {{
-    position: fixed; inset: 0; width: 100vw; height: 100vh;
-    object-fit: cover; object-position: center center;
-    z-index: 0; {"display:block;" if src_data_url else "display:none;"} 
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    object-fit: contain;               /* ← iPhoneで拡大し過ぎない */
+    object-position: center center;
+    z-index: 0;
+    opacity: 0;                        /* フェード用: 0 → 1 */
+    transition: opacity .35s ease;
+    background: #000;
+    display: block;
+    touch-action: none;
   }}
-  /* アプリ領域 */
   #stage {{
-    position: fixed; inset: 0; z-index: 1;
-    touch-action: none;  /* iOSの二本指スクロール等でドラッグが切れないように */
+    position: fixed; inset: 0; z-index: 1; pointer-events: auto;
   }}
-  /* 座標表示 */
-  #coords {{
-    position: fixed; left: 12px; top: 12px; z-index: 3;
+  #hud {{
+    position: fixed; top: 10px; left: 10px; z-index: 2;
     color: #66ccff; font: 14px/1.3 monospace;
-    background: rgba(0,0,0,0.5); padding: 4px 8px; border-radius: 6px;
-    user-select: none; -webkit-user-select: none;
+    background: rgba(0,0,0,.45);
+    padding: 4px 8px; border-radius: 4px;
+    user-select: none;
   }}
-  /* 三角：CSS の border で描く */
   .tri {{
     position: absolute; width: 0; height: 0;
     pointer-events: auto; cursor: grab; user-select: none; touch-action: none;
@@ -81,74 +122,91 @@ html = f"""
 </style>
 </head>
 <body>
-  <img id="bgimg" alt="background" src="{src_data_url or ''}">
+  <img id="bgimg" alt="bg">
   <div id="stage"></div>
-  <div id="coords">x: –, y: –</div>
+  <div id="hud">x: –, y: –</div>
 
-<script>
-(function() {{
-  const stage  = document.getElementById('stage');
-  const coords = document.getElementById('coords');
+  <script>
+  (function() {{
+    const bgimg = document.getElementById('bgimg');
+    const stage = document.getElementById('stage');
+    const hud   = document.getElementById('hud');
+    const isiOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
 
-  // 三角生成
-  function makeTriangle(id, x, y, size=80, color='#ff2a2a') {{
-    const el = document.createElement('div');
-    el.className = 'tri';
-    el.dataset.id = id;
-    el.style.borderLeft = (size/2) + 'px solid transparent';
-    el.style.borderRight = (size/2) + 'px solid transparent';
-    el.style.borderBottom = size + 'px solid ' + color;
-    el.style.left = x + 'px';
-    el.style.top  = y + 'px';
-    stage.appendChild(el);
-    return el;
-  }}
+    // Python から埋め込んだ dataURL（無ければ空文字）
+    const injectedSrc = {repr(data_url)};
 
-  // 初期三角（4つ）
-  const tris = [
-    {{id:'t1', x:120, y:120, size:80, color:'#ff2a2a'}},
-    {{id:'t2', x:240, y:220, size:70, color:'#2aff2a'}},
-    {{id:'t3', x:360, y:160, size:60, color:'#2a9dff'}},
-    {{id:'t4', x:100, y:300, size:90, color:'#ffd32a'}},
-  ];
-  tris.forEach(t => makeTriangle(t.id, t.x, t.y, t.size, t.color));
-
-  // ドラッグ処理（Pointer Events）
-  let drag = null;
-
-  stage.addEventListener('pointerdown', (e) => {{
-    const tri = e.target.closest('.tri');
-    if (!tri) return;
-    const rect = tri.getBoundingClientRect();
-    drag = {{
-      el: tri,
-      dx: e.clientX - rect.left,
-      dy: e.clientY - rect.top
-    }};
-    try {{ tri.setPointerCapture(e.pointerId); }} catch(_) {{}}
-    e.preventDefault();
-  }});
-
-  window.addEventListener('pointermove', (e) => {{
-    if (!drag) return;
-    const x = e.clientX - drag.dx;
-    const y = e.clientY - drag.dy;
-    drag.el.style.left = x + 'px';
-    drag.el.style.top  = y + 'px';
-    coords.textContent = `x: ${{Math.round(x)}}, y: ${{Math.round(y)}}`;
-  }});
-
-  window.addEventListener('pointerup', (e) => {{
-    if (drag) {{
-      try {{ drag.el.releasePointerCapture(e.pointerId); }} catch(_) {{}}
-      drag = null;
+    function setBackgroundSrc(src) {{
+      if (!src) return;
+      bgimg.style.opacity = 0; // フェードアウト
+      const test = new Image();
+      test.onload = () => {{
+        bgimg.src = src;
+        // 次フレームでフェードイン（Safariでの再描画トリガ）
+        requestAnimationFrame(() => {{
+          bgimg.style.opacity = 1;
+        }});
+      }};
+      test.onerror = () => {{
+        alert('画像の読み込みに失敗しました。');
+      }};
+      test.src = src;
     }}
-  }});
-}})();
-</script>
+
+    if (injectedSrc) {{
+      // iPhoneでも安定。dataURL なので revoke 不要
+      setBackgroundSrc(injectedSrc);
+    }}
+
+    // 三角の生成：iPhoneでは少し小さめで配置
+    const scale = isiOS ? 0.8 : 1.0;
+    function makeTri(id, x, y, size, color) {{
+      const el = document.createElement('div');
+      el.className = 'tri';
+      const s = size * scale;
+      el.style.borderLeft = (s/2) + 'px solid transparent';
+      el.style.borderRight = (s/2) + 'px solid transparent';
+      el.style.borderBottom = s + 'px solid ' + color;
+      el.style.left = x + 'px';
+      el.style.top  = y + 'px';
+      stage.appendChild(el);
+      return el;
+    }}
+
+    const tris = [
+      {{id:'t1', x:120, y:120, size:80, color:'#ff2a2a'}},
+      {{id:'t2', x:260, y:220, size:70, color:'#2aff2a'}},
+      {{id:'t3', x:400, y:160, size:60, color:'#2a9dff'}},
+      {{id:'t4', x:140, y:320, size:90, color:'#ffd32a'}},
+    ];
+    tris.forEach(t => makeTri(t.id, t.x, t.y, t.size, t.color));
+
+    // ドラッグ（Pointer Events）
+    let drag = null;
+    stage.addEventListener('pointerdown', e => {{
+      const tri = e.target.closest('.tri');
+      if (!tri) return;
+      const rect = tri.getBoundingClientRect();
+      drag = {{ el: tri, dx: e.clientX - rect.left, dy: e.clientY - rect.top }};
+      try {{ tri.setPointerCapture(e.pointerId); }} catch(_){{}}
+      e.preventDefault();
+    }});
+    window.addEventListener('pointermove', e => {{
+      if (!drag) return;
+      const x = e.clientX - drag.dx;
+      const y = e.clientY - drag.dy;
+      drag.el.style.left = x + 'px';
+      drag.el.style.top  = y + 'px';
+      hud.textContent = `x: ${{Math.round(x)}}, y: ${{Math.round(y)}}`;
+    }});
+    window.addEventListener('pointerup', e => {{
+      if (drag) {{ try {{ drag.el.releasePointerCapture(e.pointerId); }} catch(_){{}}; drag = null; }}
+    }});
+  }})();
+  </script>
 </body>
 </html>
 """
 
-# 画面全体を使うので高さは大きめを指定（スマホでも余裕を持たせる）
-st.components.v1.html(html, height=850, scrolling=False)
+# 画面（下部）に埋め込み
+components.html(html, height=720, scrolling=False)
