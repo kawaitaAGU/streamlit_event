@@ -1,181 +1,120 @@
-# streamlit_event_fixed.py
+# streamlit_triangles.py
 import streamlit as st
-from PIL import Image, ImageOps
-import io, base64
-import sys
+from PIL import Image
+import base64, io, mimetypes
 
-st.set_page_config(page_title="背景+三角ドラッグ（Streamlit）", layout="wide")
+st.set_page_config(page_title="📸 背景画像＋三角ドラッグ（Streamlit）", layout="wide")
 
-st.title("📷 背景に画像を貼って、三角をドラッグ（PC: ドロップのみ / スマホ: 撮影 or 画像選択）")
+st.title("📸 背景画像＋ドラッグ三角（iPhone OK / Streamlit）")
 
-# -----------------------
-# 画像入力（PC=ドロップ推奨 / スマホ=撮影 or ファイル）
-# -----------------------
-col1, col2 = st.columns([1, 1])
-
+# ------------------ 画像の入力（カメラ or ファイル） ------------------
+col1, col2 = st.columns(2)
 with col1:
-    st.subheader("PC／スマホ共通: 画像をドロップ or 選択")
-    file = st.file_uploader("ここに画像をドロップ（または選択）", type=["jpg", "jpeg", "png", "webp", "gif"])
-
+    cam = st.camera_input("カメラで撮影（iPhone対応）")
 with col2:
-    st.subheader("スマホ向け: カメラで撮影")
-    cam_file = st.camera_input("ここをタップして撮影（iPhone/Android）")
+    up = st.file_uploader("画像をアップロード（JPEG/PNG/WebP/GIF）", type=["jpg","jpeg","png","webp","gif"])
 
-# スマホではカメラ優先、無ければファイル
-uploaded_file = cam_file if cam_file is not None else file
+def file_to_data_url(uploaded_file) -> str | None:
+    if uploaded_file is None:
+        return None
+    # そのまま bytes 取得
+    data = uploaded_file.read()
+    # MIME 推定
+    mime = getattr(uploaded_file, "type", None)
+    if not mime:
+        mime, _ = mimetypes.guess_type(uploaded_file.name or "")
+        if mime is None:
+            # PIL でフォールバック
+            try:
+                im = Image.open(io.BytesIO(data))
+                fmt = (im.format or "JPEG").lower()
+                mime = f"image/{'jpeg' if fmt == 'jpg' else fmt}"
+            except Exception:
+                mime = "image/jpeg"
+    b64 = base64.b64encode(data).decode("ascii")
+    return f"data:{mime};base64,{b64}"
 
-if not uploaded_file:
-    st.info("画像をドロップ／選択、または（スマホなら）撮影してください。")
-    st.stop()
+# camera > uploader の優先順
+src_data_url = file_to_data_url(cam) or file_to_data_url(up)
 
-# -----------------------
-# 画像のEXIFを使った回転補正 & 圧縮
-# -----------------------
-def load_and_fix_image(uploaded) -> Image.Image:
-    try:
-        # StreamlitのUploadedFileは .read() できる
-        data = uploaded.read()
-        img = Image.open(io.BytesIO(data))
-        # EXIFの向きを補正（iPhoneの縦横問題に対応）
-        img = ImageOps.exif_transpose(img)
-        # RGBAなどはJPEG不可のためRGBに
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
-        return img
-    except Exception as e:
-        st.error(f"画像の読み込みに失敗しました: {e}")
-        raise
+if src_data_url:
+    st.success("✅ 背景画像を受け取りました。アプリ領域に反映します。")
+else:
+    st.info("⬆️ カメラ撮影 または 画像アップロードを行うと背景に設定されます。")
 
-img = load_and_fix_image(uploaded_file)
-
-# 画像を大きすぎないサイズに縮小（長辺1600px程度）
-MAX_LONG = 1600
-w, h = img.size
-scale = min(1.0, MAX_LONG / max(w, h))
-if scale < 1.0:
-    img = img.resize((int(w*scale), int(h*scale)), Image.LANCZOS)
-    w, h = img.size
-
-# data URL 化（PNGで可逆、座標・回転済み）
-buf = io.BytesIO()
-img.save(buf, format="PNG")
-data_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
-
-# -----------------------
-# JS/CSSで背景と三角のドラッグUIをHTMLとして埋め込み
-# -----------------------
-
-container_height_vh = 72  # 表示領域の高さ（画面高に対する%）
-triangle_base = 60        # 三角の基準サイズ（px）
-
+# ------------------ 埋め込み HTML / JS（ドラッグ三角 & 座標表示） ------------------
+# iPhone でも安定するよう <img id="bgimg"> に data URL を入れて表示
+# 三角は CSS ボーダーで描画、Pointer Events でドラッグ
 html = f"""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
 <style>
-  /* コンテナは画面幅いっぱい、高さは{container_height_vh}vh */
-  .wrap {{
-    position: relative;
-    width: 100%;
-    height: {container_height_vh}vh;
-    background: #111;
-    overflow: hidden;
-    border-radius: 8px;
+  html, body {{
+    margin: 0; padding: 0; height: 100%; background: #111; overflow: hidden;
   }}
-  /* 背景画像は常に全体が収まるように（左右上下のレターボックスOK） */
-  .wrap > img#bg {{
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: contain;       /* ← はみ出さずに収める */
-    object-position: center center;
-    display: block;
-    z-index: 0;
-    user-select: none;
-    -webkit-user-drag: none;
-    pointer-events: none;      /* 画像はポインタイベントを拾わない */
+  /* 背景は <img> で全面に敷く（iOS 安定） */
+  #bgimg {{
+    position: fixed; inset: 0; width: 100vw; height: 100vh;
+    object-fit: cover; object-position: center center;
+    z-index: 0; {"display:block;" if src_data_url else "display:none;"} 
   }}
-  /* ドラッグする舞台 */
-  .stage {{
-    position: absolute;
-    inset: 0;
-    z-index: 1;
-    touch-action: none;  /* スクロールよりドラッグを優先（モバイル） */
+  /* アプリ領域 */
+  #stage {{
+    position: fixed; inset: 0; z-index: 1;
+    touch-action: none;  /* iOSの二本指スクロール等でドラッグが切れないように */
   }}
-  /* 座標HUDは右下へ退避（ボタンと被らないように） */
-  .coords {{
-    position: absolute;
-    right: 8px;
-    bottom: 8px;
-    z-index: 2;
-    background: rgba(0,0,0,.5);
-    color: #66ccff;
-    font: 14px/1.2 monospace;
-    padding: 4px 8px;
-    border-radius: 6px;
-    user-select: none;
+  /* 座標表示 */
+  #coords {{
+    position: fixed; left: 12px; top: 12px; z-index: 3;
+    color: #66ccff; font: 14px/1.3 monospace;
+    background: rgba(0,0,0,0.5); padding: 4px 8px; border-radius: 6px;
+    user-select: none; -webkit-user-select: none;
   }}
+  /* 三角：CSS の border で描く */
   .tri {{
     position: absolute; width: 0; height: 0;
     pointer-events: auto; cursor: grab; user-select: none; touch-action: none;
   }}
   .tri:active {{ cursor: grabbing; }}
 </style>
-
-<div class="wrap" id="wrap">
-  <img id="bg" src="{data_url}" alt="bg">
-  <div id="stage" class="stage"></div>
-  <div id="coords" class="coords">x: –, y: –</div>
-</div>
+</head>
+<body>
+  <img id="bgimg" alt="background" src="{src_data_url or ''}">
+  <div id="stage"></div>
+  <div id="coords">x: –, y: –</div>
 
 <script>
-(() => {{
-  const stage = document.getElementById('stage');
+(function() {{
+  const stage  = document.getElementById('stage');
   const coords = document.getElementById('coords');
-  const wrap   = document.getElementById('wrap');
 
-  // 端末サイズで三角の基本サイズを微調整（モバイルは少し小さめ）
-  const isNarrow = window.matchMedia('(max-width: 600px)').matches;
-  const BASE = {triangle_base} * (isNarrow ? 0.75 : 1.0);
-
-  function makeTri(id, x, y, size, color) {{
+  // 三角生成
+  function makeTriangle(id, x, y, size=80, color='#ff2a2a') {{
     const el = document.createElement('div');
     el.className = 'tri';
     el.dataset.id = id;
-    const s = size || BASE;
-    el.style.borderLeft  = (s/2) + 'px solid transparent';
-    el.style.borderRight = (s/2) + 'px solid transparent';
-    el.style.borderBottom=  s     + 'px solid ' + (color || '#ff2a2a');
-    el.style.left = (x||80) + 'px';
-    el.style.top  = (y||80) + 'px';
+    el.style.borderLeft = (size/2) + 'px solid transparent';
+    el.style.borderRight = (size/2) + 'px solid transparent';
+    el.style.borderBottom = size + 'px solid ' + color;
+    el.style.left = x + 'px';
+    el.style.top  = y + 'px';
     stage.appendChild(el);
     return el;
   }}
 
   // 初期三角（4つ）
   const tris = [
-    {{id:'t1', x: 80,  y: 80,  size: BASE,     color:'#ff2a2a'}},
-    {{id:'t2', x: 210, y: 150, size: BASE*0.9, color:'#2aff2a'}},
-    {{id:'t3', x: 330, y: 100, size: BASE*0.8, color:'#2a9dff'}},
-    {{id:'t4', x: 120, y: 240, size: BASE*1.1, color:'#ffd32a'}},
+    {{id:'t1', x:120, y:120, size:80, color:'#ff2a2a'}},
+    {{id:'t2', x:240, y:220, size:70, color:'#2aff2a'}},
+    {{id:'t3', x:360, y:160, size:60, color:'#2a9dff'}},
+    {{id:'t4', x:100, y:300, size:90, color:'#ffd32a'}},
   ];
-  tris.forEach(t => makeTri(t.id, t.x, t.y, t.size, t.color));
+  tris.forEach(t => makeTriangle(t.id, t.x, t.y, t.size, t.color));
 
-  // ドラッグ状態
+  // ドラッグ処理（Pointer Events）
   let drag = null;
-
-  // ステージ上の移動で座標HUDをアップデート（ホバー中も更新）
-  stage.addEventListener('pointermove', (e) => {{
-    const rect = stage.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    coords.textContent = `x: ${Math.round(x)}, y: ${Math.round(y)}`;
-
-    if (!drag) return;
-    // ドラッグ対象の位置を更新（ステージ内に制限）
-    const nx = Math.min(Math.max(0, e.clientX - rect.left - drag.dx), rect.width);
-    const ny = Math.min(Math.max(0, e.clientY - rect.top  - drag.dy),  rect.height);
-    drag.el.style.left = nx + 'px';
-    drag.el.style.top  = ny + 'px';
-  }});
 
   stage.addEventListener('pointerdown', (e) => {{
     const tri = e.target.closest('.tri');
@@ -184,10 +123,19 @@ html = f"""
     drag = {{
       el: tri,
       dx: e.clientX - rect.left,
-      dy: e.clientY - rect.top,
+      dy: e.clientY - rect.top
     }};
     try {{ tri.setPointerCapture(e.pointerId); }} catch(_) {{}}
     e.preventDefault();
+  }});
+
+  window.addEventListener('pointermove', (e) => {{
+    if (!drag) return;
+    const x = e.clientX - drag.dx;
+    const y = e.clientY - drag.dy;
+    drag.el.style.left = x + 'px';
+    drag.el.style.top  = y + 'px';
+    coords.textContent = `x: ${{Math.round(x)}}, y: ${{Math.round(y)}}`;
   }});
 
   window.addEventListener('pointerup', (e) => {{
@@ -198,8 +146,9 @@ html = f"""
   }});
 }})();
 </script>
+</body>
+</html>
 """
 
-st.components.v1.html(html, height=int(0.8 * st.session_state.get("viewport_h", 900)), scrolling=False)
-
-# viewport 高さの推定（初回は既定値。必要ならJSで測ってsession_stateに入れる実装も可能）
+# 画面全体を使うので高さは大きめを指定（スマホでも余裕を持たせる）
+st.components.v1.html(html, height=850, scrolling=False)
