@@ -1,7 +1,7 @@
 # app.py
 import base64
 import io
-from PIL import Image, ImageOps        # ImageOpsを追加
+from PIL import Image, ExifTags
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -9,16 +9,36 @@ st.set_page_config(page_title="背景→三角（順序固定）", layout="wide"
 
 st.title("📷 まず背景画像を決めてから → 三角をドラッグ")
 st.caption(
-    "・PC: 画像はドラッグ&ドロップのみ / スマホ: カメラ撮影 or ファイル選択\n"
+    "・PC: 画像はドラッグ&ドロップのみ / スマホ: 写真撮影またはライブラリから選択\n"
     "・背景を決めるまでは三角レイヤーは表示しません（iPhone安定化のため）"
 )
 
 # ---------------- ユーティリティ ----------------
+def apply_exif_orientation(img: Image.Image) -> Image.Image:
+    """EXIFのOrientationタグを考慮して適切に回転する"""
+    try:
+        exif = img._getexif()
+        if exif:
+            orientation_tag = next(
+                (tag for tag, name in ExifTags.TAGS.items() if name == "Orientation"),
+                None,
+            )
+            if orientation_tag in exif:
+                orientation = exif[orientation_tag]
+                if orientation == 3:
+                    img = img.rotate(180, expand=True)
+                elif orientation == 6:
+                    img = img.rotate(270, expand=True)
+                elif orientation == 8:
+                    img = img.rotate(90, expand=True)
+    except Exception:
+        pass
+    return img
+
 def pil_to_data_url(img: Image.Image, fmt="JPEG", quality=90) -> str:
     """PIL画像 → data URL（iOSでも安定）"""
     buf = io.BytesIO()
     if fmt.upper() == "JPEG":
-        # PILはJPEG変換時にRGBが必要
         img = img.convert("RGB")
         img.save(buf, format="JPEG", quality=quality, optimize=True)
         mime = "image/jpeg"
@@ -35,10 +55,9 @@ def render_stage(bg_data_url: str):
       html, body {{
         margin: 0; height: 100%; background:#111; overflow:hidden;
       }}
-      /* 背景は <img>：iPhoneで安定させる */
       #bgimg {{
         position: fixed; inset: 0; width: 100%; height: 100%;
-        object-fit: contain;            /* 画面内に収める（回転のみ修正） */
+        object-fit: contain;
         object-position: center center;
         z-index: 0;
         display: block;
@@ -99,9 +118,7 @@ def render_stage(bg_data_url: str):
         if (!tri) return;
         const rect = tri.getBoundingClientRect();
         drag = {{ el: tri, dx: e.clientX - rect.left, dy: e.clientY - rect.top }};
-        try {{ tri.setPointerCapture(e.pointerId); }} catch(_){{
-          /* iOS Safari で未サポートでもOK */
-        }}
+        try {{ tri.setPointerCapture(e.pointerId); }} catch(_){{}}
         e.preventDefault();
       }});
       window.addEventListener('pointermove', e => {{
@@ -113,23 +130,15 @@ def render_stage(bg_data_url: str):
         coords.textContent = `x:${{Math.round(x)}}, y:${{Math.round(y)}}`;
       }});
       window.addEventListener('pointerup', e => {{
-        if (drag) {{
-          try {{ drag.el.releasePointerCapture(e.pointerId); }} catch(_){{
-            /* iOS SafariでreleasePointerCapture未実装でもOK */
-          }}
-          drag = null;
-        }}
+        if (drag) {{ try {{ drag.el.releasePointerCapture(e.pointerId); }} catch(_){{}}; drag = null; }}
       }});
     }})();
     </script>
     """
-    # 背景が決まった“後”にだけ描画（keyを変えて確実に再初期化）
     components.html(html, height=720, scrolling=False)
 
 # -------------- UI：画像を先に決める（PC/スマホタブ） --------------
-tab_pc, tab_sp = st.tabs(
-    ["💻 PC（ドラッグ&ドロップだけ）", "📱 スマホ（カメラ or ファイル）"]
-)
+tab_pc, tab_sp = st.tabs(["💻 PC（ドラッグ&ドロップだけ）", "📱 スマホ（撮影/選択）"])
 
 bg_data_url: str | None = None  # 最終的にここに入ったらステージを描画
 
@@ -142,8 +151,8 @@ with tab_pc:
     )
     if up_pc is not None:
         try:
-            # ← 画像の向きをEXIFに従って補正
-            img = ImageOps.exif_transpose(Image.open(up_pc))
+            img = Image.open(up_pc)
+            img = apply_exif_orientation(img)
             img.thumbnail((2000, 2000))  # 大きすぎる場合の保険
             bg_data_url = pil_to_data_url(img, fmt="JPEG", quality=90)
             st.success("画像を読み込みました。下に三角レイヤーが表示されます。")
@@ -151,40 +160,26 @@ with tab_pc:
             st.error(f"画像の読み込みに失敗: {e}")
 
 with tab_sp:
-    st.subheader("スマホ: カメラ撮影 または ファイルから選択")
-    c1, c2 = st.columns(2)
-    with c1:
-        cam = st.camera_input("タップして撮影（iPhone/Android）")
-        if cam is not None and bg_data_url is None:
-            try:
-                # ← カメラ画像も同様に補正
-                img_cam = ImageOps.exif_transpose(Image.open(cam))
-                img_cam.thumbnail((2000, 2000))
-                bg_data_url = pil_to_data_url(img_cam, fmt="JPEG", quality=90)
-                st.success("撮影画像を読み込みました。下に三角レイヤーが表示されます。")
-            except Exception as e:
-                st.error(f"撮影画像の読み込みに失敗: {e}")
-    with c2:
-        up_sp = st.file_uploader(
-            "ファイルから選択（写真ライブラリなど）",
-            type=["png", "jpg", "jpeg", "webp", "gif"],
-            accept_multiple_files=False,
-        )
-        if up_sp is not None and bg_data_url is None:
-            try:
-                # ← ライブラリ画像もEXIFを考慮して補正
-                img_sp = ImageOps.exif_transpose(Image.open(up_sp))
-                img_sp.thumbnail((2000, 2000))
-                bg_data_url = pil_to_data_url(img_sp, fmt="JPEG", quality=90)
-                st.success("画像を読み込みました。下に三角レイヤーが表示されます。")
-            except Exception as e:
-                st.error(f"画像の読み込みに失敗: {e}")
+    st.subheader("スマホ: 写真撮影 または ライブラリから選択")
+    up_sp = st.file_uploader(
+        "ここをタップして撮影またはファイルを選択",
+        type=["png", "jpg", "jpeg", "webp", "gif"],
+        accept_multiple_files=False,
+    )
+    if up_sp is not None:
+        try:
+            img_sp = Image.open(up_sp)
+            img_sp = apply_exif_orientation(img_sp)
+            img_sp.thumbnail((2000, 2000))
+            bg_data_url = pil_to_data_url(img_sp, fmt="JPEG", quality=90)
+            st.success("画像を読み込みました。下に三角レイヤーが表示されます。")
+        except Exception as e:
+            st.error(f"画像の読み込みに失敗: {e}")
 
 st.markdown("---")
 
 # -------------- 背景が決まっていなければ「まだ表示しない」 --------------
 if bg_data_url:
-    # 背景画像がセットされたらステージを表示
     render_stage(bg_data_url)
 else:
     st.info("まず上で**背景画像**を選ぶ/撮ると、ここに三角レイヤーが表示されます。")
