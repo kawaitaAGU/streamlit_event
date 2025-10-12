@@ -1,205 +1,190 @@
-# streamlit_event_fixed.py
+# app.py
+import base64
+import io
+from PIL import Image, ImageOps        # ImageOpsを追加
 import streamlit as st
-from PIL import Image, ImageOps
-import io, base64
-import sys
+import streamlit.components.v1 as components
 
-st.set_page_config(page_title="背景+三角ドラッグ（Streamlit）", layout="wide")
+st.set_page_config(page_title="背景→三角（順序固定）", layout="wide")
 
-st.title("📷 背景に画像を貼って、三角をドラッグ（PC: ドロップのみ / スマホ: 撮影 or 画像選択）")
+st.title("📷 まず背景画像を決めてから → 三角をドラッグ")
+st.caption(
+    "・PC: 画像はドラッグ&ドロップのみ / スマホ: カメラ撮影 or ファイル選択\n"
+    "・背景を決めるまでは三角レイヤーは表示しません（iPhone安定化のため）"
+)
 
-# -----------------------
-# 画像入力（PC=ドロップ推奨 / スマホ=撮影 or ファイル）
-# -----------------------
-col1, col2 = st.columns([1, 1])
+# ---------------- ユーティリティ ----------------
+def pil_to_data_url(img: Image.Image, fmt="JPEG", quality=90) -> str:
+    """PIL画像 → data URL（iOSでも安定）"""
+    buf = io.BytesIO()
+    if fmt.upper() == "JPEG":
+        # PILはJPEG変換時にRGBが必要
+        img = img.convert("RGB")
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        mime = "image/jpeg"
+    else:
+        img.save(buf, format=fmt)
+        mime = f"image/{fmt.lower()}"
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:{mime};base64,{b64}"
 
-with col1:
-    st.subheader("PC／スマホ共通: 画像をドロップ or 選択")
-    file = st.file_uploader("ここに画像をドロップ（または選択）", type=["jpg", "jpeg", "png", "webp", "gif"])
+def render_stage(bg_data_url: str):
+    """背景が決まってから三角レイヤーを初期化して重ねる"""
+    html = f"""
+    <style>
+      html, body {{
+        margin: 0; height: 100%; background:#111; overflow:hidden;
+      }}
+      /* 背景は <img>：iPhoneで安定させる */
+      #bgimg {{
+        position: fixed; inset: 0; width: 100%; height: 100%;
+        object-fit: contain;            /* 画面内に収める（回転のみ修正） */
+        object-position: center center;
+        z-index: 0;
+        display: block;
+      }}
+      #stage {{
+        position: fixed; inset: 0; z-index: 1;
+      }}
+      #coords {{
+        position: fixed; top: 10px; left: 10px;
+        z-index: 2;
+        color: #66ccff; font: 14px/1.3 monospace;
+        background: rgba(0,0,0,.45);
+        padding: 2px 6px; border-radius: 4px;
+        pointer-events: none;
+      }}
+      .tri {{
+        position: absolute; width: 0; height: 0;
+        pointer-events: auto; cursor: grab; user-select: none; touch-action: none;
+      }}
+      .tri:active {{ cursor: grabbing; }}
+    </style>
 
-with col2:
-    st.subheader("スマホ向け: カメラで撮影")
-    cam_file = st.camera_input("ここをタップして撮影（iPhone/Android）")
+    <img id="bgimg" src="{bg_data_url}" alt="background">
+    <div id="stage"></div>
+    <div id="coords">x: –, y: –</div>
 
-# スマホではカメラ優先、無ければファイル
-uploaded_file = cam_file if cam_file is not None else file
+    <script>
+    (function(){{
+      const stage  = document.getElementById('stage');
+      const coords = document.getElementById('coords');
 
-if not uploaded_file:
-    st.info("画像をドロップ／選択、または（スマホなら）撮影してください。")
-    st.stop()
+      function makeTriangle(id, x, y, size=70, color='#ff2a2a') {{
+        const el = document.createElement('div');
+        el.className = 'tri';
+        el.dataset.id = id;
+        el.style.borderLeft = (size/2) + 'px solid transparent';
+        el.style.borderRight = (size/2) + 'px solid transparent';
+        el.style.borderBottom = size + 'px solid ' + color;
+        el.style.left = x + 'px';
+        el.style.top  = y + 'px';
+        stage.appendChild(el);
+        return el;
+      }}
 
-# -----------------------
-# 画像のEXIFを使った回転補正 & 圧縮
-# -----------------------
-def load_and_fix_image(uploaded) -> Image.Image:
-    try:
-        # StreamlitのUploadedFileは .read() できる
-        data = uploaded.read()
-        img = Image.open(io.BytesIO(data))
-        # EXIFの向きを補正（iPhoneの縦横問題に対応）
-        img = ImageOps.exif_transpose(img)
-        # RGBAなどはJPEG不可のためRGBに
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
-        return img
-    except Exception as e:
-        st.error(f"画像の読み込みに失敗しました: {e}")
-        raise
+      // 初期三角（控えめサイズ）
+      const tris = [
+        {{id:'t1', x:120, y:120, size:60, color:'#ff2a2a'}},
+        {{id:'t2', x:240, y:220, size:50, color:'#2aff2a'}},
+        {{id:'t3', x:360, y:160, size:45, color:'#2a9dff'}},
+        {{id:'t4', x:100, y:300, size:70, color:'#ffd32a'}},
+      ];
+      tris.forEach(t => makeTriangle(t.id, t.x, t.y, t.size, t.color));
 
-img = load_and_fix_image(uploaded_file)
+      // ドラッグ（Pointer Events）
+      let drag = null;
+      stage.addEventListener('pointerdown', e => {{
+        const tri = e.target.closest('.tri');
+        if (!tri) return;
+        const rect = tri.getBoundingClientRect();
+        drag = {{ el: tri, dx: e.clientX - rect.left, dy: e.clientY - rect.top }};
+        try {{ tri.setPointerCapture(e.pointerId); }} catch(_){{
+          /* iOS Safari で未サポートでもOK */
+        }}
+        e.preventDefault();
+      }});
+      window.addEventListener('pointermove', e => {{
+        if (!drag) return;
+        const x = e.clientX - drag.dx;
+        const y = e.clientY - drag.dy;
+        drag.el.style.left = x + 'px';
+        drag.el.style.top  = y + 'px';
+        coords.textContent = `x:${{Math.round(x)}}, y:${{Math.round(y)}}`;
+      }});
+      window.addEventListener('pointerup', e => {{
+        if (drag) {{
+          try {{ drag.el.releasePointerCapture(e.pointerId); }} catch(_){{
+            /* iOS SafariでreleasePointerCapture未実装でもOK */
+          }}
+          drag = null;
+        }}
+      }});
+    }})();
+    </script>
+    """
+    # 背景が決まった“後”にだけ描画（keyを変えて確実に再初期化）
+    components.html(html, height=720, scrolling=False)
 
-# 画像を大きすぎないサイズに縮小（長辺1600px程度）
-MAX_LONG = 1600
-w, h = img.size
-scale = min(1.0, MAX_LONG / max(w, h))
-if scale < 1.0:
-    img = img.resize((int(w*scale), int(h*scale)), Image.LANCZOS)
-    w, h = img.size
+# -------------- UI：画像を先に決める（PC/スマホタブ） --------------
+tab_pc, tab_sp = st.tabs(
+    ["💻 PC（ドラッグ&ドロップだけ）", "📱 スマホ（カメラ or ファイル）"]
+)
 
-# data URL 化（PNGで可逆、座標・回転済み）
-buf = io.BytesIO()
-img.save(buf, format="PNG")
-data_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+bg_data_url: str | None = None  # 最終的にここに入ったらステージを描画
 
-# -----------------------
-# JS/CSSで背景と三角のドラッグUIをHTMLとして埋め込み
-# -----------------------
+with tab_pc:
+    st.subheader("PC: 画像をドラッグ&ドロップ")
+    up_pc = st.file_uploader(
+        "ここに画像をドラッグ&ドロップ（またはクリックで選択）",
+        type=["png", "jpg", "jpeg", "webp", "gif"],
+        accept_multiple_files=False,
+    )
+    if up_pc is not None:
+        try:
+            # ← 画像の向きをEXIFに従って補正
+            img = ImageOps.exif_transpose(Image.open(up_pc))
+            img.thumbnail((2000, 2000))  # 大きすぎる場合の保険
+            bg_data_url = pil_to_data_url(img, fmt="JPEG", quality=90)
+            st.success("画像を読み込みました。下に三角レイヤーが表示されます。")
+        except Exception as e:
+            st.error(f"画像の読み込みに失敗: {e}")
 
-container_height_vh = 72  # 表示領域の高さ（画面高に対する%）
-triangle_base = 60        # 三角の基準サイズ（px）
+with tab_sp:
+    st.subheader("スマホ: カメラ撮影 または ファイルから選択")
+    c1, c2 = st.columns(2)
+    with c1:
+        cam = st.camera_input("タップして撮影（iPhone/Android）")
+        if cam is not None and bg_data_url is None:
+            try:
+                # ← カメラ画像も同様に補正
+                img_cam = ImageOps.exif_transpose(Image.open(cam))
+                img_cam.thumbnail((2000, 2000))
+                bg_data_url = pil_to_data_url(img_cam, fmt="JPEG", quality=90)
+                st.success("撮影画像を読み込みました。下に三角レイヤーが表示されます。")
+            except Exception as e:
+                st.error(f"撮影画像の読み込みに失敗: {e}")
+    with c2:
+        up_sp = st.file_uploader(
+            "ファイルから選択（写真ライブラリなど）",
+            type=["png", "jpg", "jpeg", "webp", "gif"],
+            accept_multiple_files=False,
+        )
+        if up_sp is not None and bg_data_url is None:
+            try:
+                # ← ライブラリ画像もEXIFを考慮して補正
+                img_sp = ImageOps.exif_transpose(Image.open(up_sp))
+                img_sp.thumbnail((2000, 2000))
+                bg_data_url = pil_to_data_url(img_sp, fmt="JPEG", quality=90)
+                st.success("画像を読み込みました。下に三角レイヤーが表示されます。")
+            except Exception as e:
+                st.error(f"画像の読み込みに失敗: {e}")
 
-html = f"""
-<style>
-  /* コンテナは画面幅いっぱい、高さは{container_height_vh}vh */
-  .wrap {{
-    position: relative;
-    width: 100%;
-    height: {container_height_vh}vh;
-    background: #111;
-    overflow: hidden;
-    border-radius: 8px;
-  }}
-  /* 背景画像は常に全体が収まるように（左右上下のレターボックスOK） */
-  .wrap > img#bg {{
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: contain;       /* ← はみ出さずに収める */
-    object-position: center center;
-    display: block;
-    z-index: 0;
-    user-select: none;
-    -webkit-user-drag: none;
-    pointer-events: none;      /* 画像はポインタイベントを拾わない */
-  }}
-  /* ドラッグする舞台 */
-  .stage {{
-    position: absolute;
-    inset: 0;
-    z-index: 1;
-    touch-action: none;  /* スクロールよりドラッグを優先（モバイル） */
-  }}
-  /* 座標HUDは右下へ退避（ボタンと被らないように） */
-  .coords {{
-    position: absolute;
-    right: 8px;
-    bottom: 8px;
-    z-index: 2;
-    background: rgba(0,0,0,.5);
-    color: #66ccff;
-    font: 14px/1.2 monospace;
-    padding: 4px 8px;
-    border-radius: 6px;
-    user-select: none;
-  }}
-  .tri {{
-    position: absolute; width: 0; height: 0;
-    pointer-events: auto; cursor: grab; user-select: none; touch-action: none;
-  }}
-  .tri:active {{ cursor: grabbing; }}
-</style>
+st.markdown("---")
 
-<div class="wrap" id="wrap">
-  <img id="bg" src="{data_url}" alt="bg">
-  <div id="stage" class="stage"></div>
-  <div id="coords" class="coords">x: –, y: –</div>
-</div>
-
-<script>
-(() => {{
-  const stage = document.getElementById('stage');
-  const coords = document.getElementById('coords');
-  const wrap   = document.getElementById('wrap');
-
-  // 端末サイズで三角の基本サイズを微調整（モバイルは少し小さめ）
-  const isNarrow = window.matchMedia('(max-width: 600px)').matches;
-  const BASE = {triangle_base} * (isNarrow ? 0.75 : 1.0);
-
-  function makeTri(id, x, y, size, color) {{
-    const el = document.createElement('div');
-    el.className = 'tri';
-    el.dataset.id = id;
-    const s = size || BASE;
-    el.style.borderLeft  = (s/2) + 'px solid transparent';
-    el.style.borderRight = (s/2) + 'px solid transparent';
-    el.style.borderBottom=  s     + 'px solid ' + (color || '#ff2a2a');
-    el.style.left = (x||80) + 'px';
-    el.style.top  = (y||80) + 'px';
-    stage.appendChild(el);
-    return el;
-  }}
-
-  // 初期三角（4つ）
-  const tris = [
-    {{id:'t1', x: 80,  y: 80,  size: BASE,     color:'#ff2a2a'}},
-    {{id:'t2', x: 210, y: 150, size: BASE*0.9, color:'#2aff2a'}},
-    {{id:'t3', x: 330, y: 100, size: BASE*0.8, color:'#2a9dff'}},
-    {{id:'t4', x: 120, y: 240, size: BASE*1.1, color:'#ffd32a'}},
-  ];
-  tris.forEach(t => makeTri(t.id, t.x, t.y, t.size, t.color));
-
-  // ドラッグ状態
-  let drag = null;
-
-  // ステージ上の移動で座標HUDをアップデート（ホバー中も更新）
-  stage.addEventListener('pointermove', (e) => {{
-    const rect = stage.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    coords.textContent = `x: ${Math.round(x)}, y: ${Math.round(y)}`;
-
-    if (!drag) return;
-    // ドラッグ対象の位置を更新（ステージ内に制限）
-    const nx = Math.min(Math.max(0, e.clientX - rect.left - drag.dx), rect.width);
-    const ny = Math.min(Math.max(0, e.clientY - rect.top  - drag.dy),  rect.height);
-    drag.el.style.left = nx + 'px';
-    drag.el.style.top  = ny + 'px';
-  }});
-
-  stage.addEventListener('pointerdown', (e) => {{
-    const tri = e.target.closest('.tri');
-    if (!tri) return;
-    const rect = tri.getBoundingClientRect();
-    drag = {{
-      el: tri,
-      dx: e.clientX - rect.left,
-      dy: e.clientY - rect.top,
-    }};
-    try {{ tri.setPointerCapture(e.pointerId); }} catch(_) {{}}
-    e.preventDefault();
-  }});
-
-  window.addEventListener('pointerup', (e) => {{
-    if (drag) {{
-      try {{ drag.el.releasePointerCapture(e.pointerId); }} catch(_) {{}}
-      drag = null;
-    }}
-  }});
-}})();
-</script>
-"""
-
-st.components.v1.html(html, height=int(0.8 * st.session_state.get("viewport_h", 900)), scrolling=False)
-
-# viewport 高さの推定（初回は既定値。必要ならJSで測ってsession_stateに入れる実装も可能）
+# -------------- 背景が決まっていなければ「まだ表示しない」 --------------
+if bg_data_url:
+    # 背景画像がセットされたらステージを表示
+    render_stage(bg_data_url)
+else:
+    st.info("まず上で**背景画像**を選ぶ/撮ると、ここに三角レイヤーが表示されます。")
