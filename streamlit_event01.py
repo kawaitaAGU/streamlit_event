@@ -94,6 +94,19 @@ ANGLE_DEFINITIONS: List[Tuple[str, Tuple[Tuple[str, str], Tuple[str, str]]]] = [
     ("L1_FH", (("L1", "L1r"), ("Or", "Po"))),
 ]
 
+PLANE_DEFINITIONS = [
+    {"id": "SN", "name": "S-N plane", "start": "S", "end": "N", "color": "#fde047", "width": 2.5},
+    {"id": "FH", "name": "Or-Po (FH) plane", "start": "Or", "end": "Po", "color": "#60a5fa", "width": 2.5},
+    {"id": "Facial", "name": "N-Pog plane", "start": "N", "end": "Pog", "color": "#a855f7", "width": 2.5},
+    {"id": "NA", "name": "N-A plane", "start": "N", "end": "A", "color": "#fb7185", "width": 2.5},
+    {"id": "APog", "name": "A-Pog plane", "start": "A", "end": "Pog", "color": "#f97316", "width": 2.5},
+    {"id": "Mandibular", "name": "Me-Am plane", "start": "Me", "end": "Am", "color": "#22c55e", "width": 2.5},
+    {"id": "AB", "name": "A-B plane", "start": "A", "end": "B", "color": "#facc15", "width": 2.5},
+    {"id": "U1Axis", "name": "U1-U1r plane", "start": "U1", "end": "U1r", "color": "#38bdf8", "width": 2.5},
+    {"id": "L1Axis", "name": "L1-L1r plane", "start": "L1", "end": "L1r", "color": "#14b8a6", "width": 2.5},
+    {"id": "Ramus", "name": "Ar-Pm plane", "start": "Ar", "end": "Pm", "color": "#f59e0b", "width": 2.5},
+]
+
 RESULT_ORDER = [
     "Facial",
     "Convexity",
@@ -181,6 +194,18 @@ def build_component_payload(
             }
             for item in CEPH_POINTS
         ],
+        "planes": [
+            {
+                "id": plane["id"],
+                "name": plane["name"],
+                "start": plane["start"],
+                "end": plane["end"],
+                "color": plane.get("color", "#fde68a"),
+                "width": plane.get("width", 2),
+                "dash": plane.get("dash"),
+            }
+            for plane in PLANE_DEFINITIONS
+        ],
     }
     json_payload = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
     return json_payload
@@ -209,6 +234,11 @@ def render_ceph_component(
         user-select: none;
         -webkit-user-select: none;
       }}
+      #ceph-planes {{
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+      }}
       #ceph-stage {{
         position: absolute;
         inset: 0;
@@ -216,7 +246,7 @@ def render_ceph_component(
       }}
       .ceph-marker {{
         position: absolute;
-        transform: translate(-50%, -100%);
+        transform: translate(-50%, 0);
         cursor: grab;
         pointer-events: auto;
         touch-action: none;
@@ -253,6 +283,7 @@ def render_ceph_component(
     </style>
     <div class="ceph-wrapper">
       <img id="ceph-image" src="{image_data_url}" alt="cephalometric background" />
+      <svg id="ceph-planes"></svg>
       <div id="ceph-stage"></div>
       <div id="ceph-coords">ポイントをドラッグして位置を調整できます。</div>
     </div>
@@ -262,8 +293,9 @@ def render_ceph_component(
         const wrapper = document.querySelector(".ceph-wrapper");
         const image = document.getElementById("ceph-image");
         const stage = document.getElementById("ceph-stage");
+        const planesSvg = document.getElementById("ceph-planes");
         const coords = document.getElementById("ceph-coords");
-        if (!wrapper || !image || !stage) {{
+        if (!wrapper || !image || !stage || !planesSvg) {{
           return;
         }}
 
@@ -294,8 +326,12 @@ def render_ceph_component(
 
         const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
         const markers = [];
+        const markerById = {{}};
         const dragOffset = {{ x: 0, y: 0 }};
         let activeMarker = null;
+
+        const planeDefs = Array.isArray(payload.planes) ? payload.planes : [];
+        const planeLines = [];
 
         const setPosition = (marker, left, top) => {{
           const width = stage.clientWidth || 1;
@@ -304,10 +340,11 @@ def render_ceph_component(
           const clampedTop = clamp(top, 0, height);
           marker.style.left = `${{clampedLeft}}px`;
           marker.style.top = `${{clampedTop}}px`;
-          marker.dataset.left = clampedLeft;
-          marker.dataset.top = clampedTop;
+          marker.dataset.left = String(clampedLeft);
+          marker.dataset.top = String(clampedTop);
           marker.dataset.ratioX = width ? clampedLeft / width : 0;
           marker.dataset.ratioY = height ? clampedTop / height : 0;
+          updateMarkerLabel(marker);
         }};
 
         const setFromRatios = (marker) => {{
@@ -337,11 +374,52 @@ def render_ceph_component(
           }});
         }};
 
+        const updatePlanes = () => {{
+          if (!planesSvg) {{
+            return;
+          }}
+          const width = stage.clientWidth || 0;
+          const height = stage.clientHeight || 0;
+          planesSvg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
+          planesSvg.setAttribute("width", width);
+          planesSvg.setAttribute("height", height);
+          planeLines.forEach((entry) => {{
+            const plane = entry.plane;
+            const line = entry.line;
+            const startMarker = markerById[plane.start];
+            const endMarker = markerById[plane.end];
+            if (!startMarker || !endMarker) {{
+              line.style.opacity = 0;
+              return;
+            }}
+            line.style.opacity = 1;
+            line.setAttribute("x1", startMarker.dataset.left || "0");
+            line.setAttribute("y1", startMarker.dataset.top || "0");
+            line.setAttribute("x2", endMarker.dataset.left || "0");
+            line.setAttribute("y2", endMarker.dataset.top || "0");
+          }});
+        }};
+
+        const updateMarkerLabel = (marker) => {{
+          if (!showLabels) {{
+            return;
+          }}
+          const labelEl = marker.querySelector(".label");
+          if (!labelEl) {{
+            return;
+          }}
+          const baseLabel = marker.dataset.baseLabel || marker.dataset.id || "";
+          const x = Math.round(parseFloat(marker.dataset.left || "0"));
+          const y = Math.round(parseFloat(marker.dataset.top || "0"));
+          labelEl.textContent = `${{baseLabel}} (${{x}}, ${{y}})`;
+        }};
+
         const createMarker = (pt) => {{
           const marker = document.createElement("div");
           marker.className = "ceph-marker";
           marker.dataset.id = pt.id;
           marker.dataset.label = pt.label || pt.id;
+          marker.dataset.baseLabel = pt.label || pt.id;
           marker.dataset.ratioX = typeof pt.ratio_x === "number" ? pt.ratio_x : 0.5;
           marker.dataset.ratioY = typeof pt.ratio_y === "number" ? pt.ratio_y : 0.5;
           marker.dataset.size = pt.size || defaultSize;
@@ -357,12 +435,12 @@ def render_ceph_component(
           if (showLabels) {{
             const label = document.createElement("div");
             label.className = "label";
-            label.textContent = marker.dataset.label;
             marker.appendChild(label);
           }}
 
           stage.appendChild(marker);
           markers.push(marker);
+          markerById[pt.id] = marker;
 
           marker.addEventListener("pointerdown", (event) => {{
             const stageRect = stage.getBoundingClientRect();
@@ -375,15 +453,31 @@ def render_ceph_component(
             try {{
               marker.setPointerCapture(event.pointerId);
             }} catch (err) {{}}
-            coords.textContent = `${{marker.dataset.label}}: x=${{Math.round(left)}}, y=${{Math.round(top)}}`;
+            coords.textContent = `${{marker.dataset.baseLabel}}: x=${{Math.round(left)}}, y=${{Math.round(top)}}`;
+            updateMarkerLabel(marker);
             event.preventDefault();
           }});
         }};
 
         payload.points.forEach(createMarker);
 
+        planeDefs.forEach(function(plane) {{
+          const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+          line.setAttribute("stroke", plane.color || "#fde047");
+          line.setAttribute("stroke-width", plane.width || 2);
+          line.setAttribute("stroke-linecap", "round");
+          if (plane.dash) {{
+            line.setAttribute("stroke-dasharray", plane.dash);
+          }}
+          line.setAttribute("data-plane-id", plane.id || "");
+          line.style.opacity = 0;
+          planesSvg.appendChild(line);
+          planeLines.push({{ plane: plane, line: line }});
+        }});
+
         const updateLayout = () => {{
           markers.forEach(setFromRatios);
+          updatePlanes();
           coords.textContent = "位置情報を取得しました。";
           emitState("layout", null);
         }};
@@ -396,7 +490,8 @@ def render_ceph_component(
           const left = event.clientX - stageRect.left - dragOffset.x;
           const top = event.clientY - stageRect.top - dragOffset.y;
           setPosition(activeMarker, left, top);
-          coords.textContent = `${{activeMarker.dataset.label}}: x=${{Math.round(parseFloat(activeMarker.dataset.left || "0"))}}, y=${{Math.round(parseFloat(activeMarker.dataset.top || "0"))}}`;
+          updatePlanes();
+          coords.textContent = `${{activeMarker.dataset.baseLabel}}: x=${{Math.round(parseFloat(activeMarker.dataset.left || "0"))}}, y=${{Math.round(parseFloat(activeMarker.dataset.top || "0"))}}`;
           event.preventDefault();
         }};
 
@@ -409,7 +504,8 @@ def render_ceph_component(
           }} catch (err) {{}}
           const activeId = activeMarker.dataset.id;
           activeMarker.classList.remove("dragging");
-          coords.textContent = `${{activeMarker.dataset.label}}: x=${{Math.round(parseFloat(activeMarker.dataset.left || "0"))}}, y=${{Math.round(parseFloat(activeMarker.dataset.top || "0"))}}`;
+          coords.textContent = `${{activeMarker.dataset.baseLabel}}: x=${{Math.round(parseFloat(activeMarker.dataset.left || "0"))}}, y=${{Math.round(parseFloat(activeMarker.dataset.top || "0"))}}`;
+          updatePlanes();
           activeMarker = null;
           emitState(eventType, activeId);
         }};
