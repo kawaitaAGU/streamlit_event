@@ -1,11 +1,13 @@
 import base64
-import json
 import math
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import streamlit as st
-import streamlit.components.v1 as components
+import plotly.graph_objects as go
+
+from ceph_component import ceph_component
 
 
 st.set_page_config(page_title="Cephalo Analyzer (Streamlit版)", layout="wide")
@@ -14,6 +16,15 @@ st.set_page_config(page_title="Cephalo Analyzer (Streamlit版)", layout="wide")
 
 BASE_CANVAS_WIDTH = 800
 BASE_CANVAS_HEIGHT = 750
+
+
+
+@dataclass(frozen=True)
+class PolygonRow:
+    label: str
+    mean: float
+    sd: float
+    sd_ratio: float  # 0〜0.25あたりのスケール係数
 
 POINT_IDS = [
     "N",
@@ -123,6 +134,43 @@ RESULT_ORDER = [
     "L1_FH",
 ]
 
+POLYGON_ROWS: List[PolygonRow] = [
+    PolygonRow("00", 0.0, 0.0, 0.0),  # 上部ダミー
+    PolygonRow("Facial", 83.1, 2.5, 0.1036),
+    PolygonRow("Convexity", 11.3, 4.6, 0.1607),
+    PolygonRow("FH_mandiblar", 32.0, 2.4, 0.0893),
+    PolygonRow("Gonial_angle", 129.2, 4.7, 0.1786),
+    PolygonRow("Ramus_angle", 89.7, 3.7, 0.1429),
+    PolygonRow("SNP", 76.1, 2.8, 0.1250),
+    PolygonRow("SNA", 80.9, 3.1, 0.1250),
+    PolygonRow("SNB", 76.2, 2.8, 0.1286),
+    PolygonRow("SNA-SNB diff", 4.7, 1.8, 0.0714),
+    PolygonRow("01", 0.0, 0.0, 0.0),  # 中央の切れ目
+    PolygonRow("Interincisal", 124.3, 6.9, 0.2500),
+    PolygonRow("U1 to FH plane", 109.8, 5.3, 0.1679),
+    PolygonRow("L1 to Mandibular", 93.8, 5.9, 0.2107),
+    PolygonRow("L1_FH", 57.2, 3.9, 0.2500),
+    PolygonRow("ZZ", 0.0, 0.0, 0.0),  # 下部ダミー
+]
+
+SD_PERCENT_SCALE = 4.0
+SD_PERCENT_MAP = {
+    "Facial": 0.1036,
+    "Convexity": 0.1607,
+    "FH_mandiblar": 0.0893,
+    "Gonial_angle": 0.1786,
+    "Ramus_angle": 0.1429,
+    "SNP": 0.1250,
+    "SNA": 0.1250,
+    "SNB": 0.1286,
+    "SNA-SNB diff": 0.0714,
+    "Interincisal": 0.2500,
+    "U1 to FH plane": 0.1679,
+    "L1 to Mandibular": 0.2107,
+    "L1_FH": 0.2500,
+}
+
+
 REFERENCE_DATA: Dict[str, Tuple[float, float]] = {
     "Facial": (83.1, 2.5),
     "Convexity": (11.3, 4.6),
@@ -137,6 +185,23 @@ REFERENCE_DATA: Dict[str, Tuple[float, float]] = {
     "U1 to FH plane": (109.8, 5.3),
     "L1 to Mandibular": (93.8, 5.9),
     "L1_FH": (57.2, 3.9),
+}
+
+SD_PERCENT_SCALE = 4.0
+SD_PERCENT_MAP = {
+    "Facial": 0.1036,
+    "Convexity": 0.1607,
+    "FH_mandiblar": 0.0893,
+    "Gonial_angle": 0.1786,
+    "Ramus_angle": 0.1429,
+    "SNP": 0.1250,
+    "SNA": 0.1250,
+    "SNB": 0.1286,
+    "SNA-SNB diff": 0.0714,
+    "Interincisal": 0.2500,
+    "U1 to FH plane": 0.1679,
+    "L1 to Mandibular": 0.2107,
+    "L1_FH": 0.2500,
 }
 
 
@@ -179,18 +244,88 @@ def build_component_payload(
     marker_size: int,
     show_labels: bool,
     point_state: Dict[str, Dict[str, float]],
-) -> str:
-    payload = {
-        "image": image_data_url,
-        "markerSize": marker_size,
-        "showLabels": show_labels,
+) -> Dict[str, Any]:
+    polygon_rows = POLYGON_ROWS
+    ratios = [row.sd_ratio for row in polygon_rows]
+    y_positions = list(range(len(polygon_rows)))
+    left_base = [-(ratio * SD_PERCENT_SCALE) for ratio in ratios]
+    right_base = [(ratio * SD_PERCENT_SCALE) for ratio in ratios]
+    base_polygon_x = left_base[1:] + right_base[::-1][:-1] + [left_base[1]]
+    base_polygon_y = y_positions[1:] + y_positions[::-1][:-1] + [y_positions[1]]
+    x_min, x_max = -3.2, 3.2
+    overlay_x_min, overlay_x_max = 0.21, 0.53
+    overlay_y_top, overlay_y_bottom = 0.82, 0.18
+    max_y = len(polygon_rows) - 1
+
+    def map_x(value: float) -> float:
+        return overlay_x_min + (value - x_min) / (x_max - x_min) * (overlay_x_max - overlay_x_min)
+
+    def map_y(index: float) -> float:
+        if max_y == 0:
+            return (overlay_y_top + overlay_y_bottom) / 2
+        return overlay_y_top - (index / max_y) * (overlay_y_top - overlay_y_bottom)
+
+    mapped_polygon_points = [
+        {"x": map_x(x_value), "y": map_y(y_value)}
+        for x_value, y_value in zip(base_polygon_x, base_polygon_y)
+    ]
+
+    polygon_markers: List[Dict[str, Any]] = []
+    try:
+        sna_index = next(idx for idx, row in enumerate(polygon_rows) if row.label == "SNA")
+        sna_row = polygon_rows[sna_index]
+        polygon_markers.append(
+            {
+                "id": "SNA",
+                "angle_id": "SNA",
+                "color": "#ef4444",
+                "size": 10,
+                "mean": sna_row.mean,
+                "sd": sna_row.sd,
+                "sd_ratio": sna_row.sd_ratio,
+                "sd_scale": SD_PERCENT_SCALE,
+                "position": {
+                    "x": map_x((left_base[sna_index] + right_base[sna_index]) / 2),
+                    "y": map_y(y_positions[sna_index]),
+                },
+            }
+        )
+    except StopIteration:
+        pass
+
+    angles_payload: List[Dict[str, Any]] = [
+        {
+            "id": name,
+            "label": name,
+            "type": "segments",
+            "segments": [
+                {"start": a1, "end": a2},
+                {"start": b1, "end": b2},
+            ],
+            "supplement": name == "Convexity",
+        }
+        for name, ((a1, a2), (b1, b2)) in ANGLE_DEFINITIONS
+    ]
+    angles_payload.append(
+        {
+            "id": "SNA-SNB diff",
+            "label": "SNA-SNB diff",
+            "type": "difference",
+            "minuend": "SNA",
+            "subtrahend": "SNB",
+        }
+    )
+    return {
+        "image_data_url": image_data_url,
+        "marker_size": marker_size,
+        "show_labels": show_labels,
         "points": [
             {
                 "id": item["id"],
                 "label": item["label"],
                 "color": item["color"],
-                "ratio_x": point_state.get(item["id"], {}).get("x_ratio", 0.5),
-                "ratio_y": point_state.get(item["id"], {}).get("y_ratio", 0.5),
+                "ratio_x": float(point_state.get(item["id"], {}).get("x_ratio", 0.5)),
+                "ratio_y": float(point_state.get(item["id"], {}).get("y_ratio", 0.5)),
             }
             for item in CEPH_POINTS
         ],
@@ -206,9 +341,24 @@ def build_component_payload(
             }
             for plane in PLANE_DEFINITIONS
         ],
+        "angles": angles_payload,
+        "polygons": [
+            {
+                "id": "standard_polygon",
+                "points": mapped_polygon_points,
+                "fill": "rgba(30, 64, 175, 0.28)",
+                "stroke": "#1e40af",
+                "stroke_width": 2,
+                "markers": polygon_markers,
+                "mapping": {
+                    "x_min": x_min,
+                    "x_max": x_max,
+                    "overlay_x_min": overlay_x_min,
+                    "overlay_x_max": overlay_x_max,
+                },
+            }
+        ],
     }
-    json_payload = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
-    return json_payload
 
 
 def render_ceph_component(
@@ -217,322 +367,17 @@ def render_ceph_component(
     show_labels: bool,
     point_state: Dict[str, Dict[str, float]],
 ) -> Optional[Dict]:
-    payload_json = build_component_payload(image_data_url, marker_size, show_labels, point_state)
-
-    html = f"""
-    <style>
-      .ceph-wrapper {{
-        position: relative;
-        width: min(100%, 960px);
-        margin: 0 auto;
-      }}
-      .ceph-wrapper img {{
-        width: 100%;
-        height: auto;
-        display: block;
-        pointer-events: none;
-        user-select: none;
-        -webkit-user-select: none;
-      }}
-      #ceph-planes {{
-        position: absolute;
-        inset: 0;
-        pointer-events: none;
-      }}
-      #ceph-stage {{
-        position: absolute;
-        inset: 0;
-        pointer-events: none;
-      }}
-      .ceph-marker {{
-        position: absolute;
-        transform: translate(-50%, 0);
-        cursor: grab;
-        pointer-events: auto;
-        touch-action: none;
-        text-align: center;
-        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }}
-      .ceph-marker.dragging {{
-        cursor: grabbing;
-      }}
-      .ceph-marker .pin {{
-        width: 0;
-        height: 0;
-        margin: 0 auto;
-      }}
-      .ceph-marker .label {{
-        margin-top: 4px;
-        font-size: 12px;
-        font-weight: 600;
-        color: #f8fafc;
-        text-shadow: 0 1px 2px rgba(15, 23, 42, 0.8);
-        letter-spacing: 0.04em;
-      }}
-      #ceph-coords {{
-        position: absolute;
-        top: 12px;
-        left: 12px;
-        background: rgba(15, 23, 42, 0.68);
-        color: #e2e8f0;
-        padding: 6px 10px;
-        border-radius: 6px;
-        font: 12px/1.4 monospace;
-        pointer-events: none;
-      }}
-    </style>
-    <div class="ceph-wrapper">
-      <img id="ceph-image" src="{image_data_url}" alt="cephalometric background" />
-      <svg id="ceph-planes"></svg>
-      <div id="ceph-stage"></div>
-      <div id="ceph-coords">ポイントをドラッグして位置を調整できます。</div>
-    </div>
-    <script>
-      const payload = {payload_json};
-      (function() {{
-        const wrapper = document.querySelector(".ceph-wrapper");
-        const image = document.getElementById("ceph-image");
-        const stage = document.getElementById("ceph-stage");
-        const planesSvg = document.getElementById("ceph-planes");
-        const coords = document.getElementById("ceph-coords");
-        if (!wrapper || !image || !stage || !planesSvg) {{
-          return;
-        }}
-
-        const showLabels = payload.showLabels !== false;
-        const defaultSize = payload.markerSize || 28;
-        const frameId = window.frameElement ? window.frameElement.id : "streamlit-frame";
-
-        const postMessage = (payload) => {{
-          if (!window.parent) {{
-            return;
-          }}
-          window.parent.postMessage(
-            {{
-              isStreamlitMessage: true,
-              id: frameId,
-              ...payload,
-            }},
-            "*"
-          );
-        }};
-
-        const emitValue = (value) => {{
-          postMessage({{
-            type: "streamlit:setComponentValue",
-            value,
-          }});
-        }};
-
-        const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
-        const markers = [];
-        const markerById = {{}};
-        const dragOffset = {{ x: 0, y: 0 }};
-        let activeMarker = null;
-
-        const planeDefs = Array.isArray(payload.planes) ? payload.planes : [];
-        const planeLines = [];
-
-        const setPosition = (marker, left, top) => {{
-          const width = stage.clientWidth || 1;
-          const height = stage.clientHeight || 1;
-          const clampedLeft = clamp(left, 0, width);
-          const clampedTop = clamp(top, 0, height);
-          marker.style.left = `${{clampedLeft}}px`;
-          marker.style.top = `${{clampedTop}}px`;
-          marker.dataset.left = String(clampedLeft);
-          marker.dataset.top = String(clampedTop);
-          marker.dataset.ratioX = width ? clampedLeft / width : 0;
-          marker.dataset.ratioY = height ? clampedTop / height : 0;
-          updateMarkerLabel(marker);
-        }};
-
-        const setFromRatios = (marker) => {{
-          const width = stage.clientWidth || 1;
-          const height = stage.clientHeight || 1;
-          const ratioX = parseFloat(marker.dataset.ratioX || "0.5");
-          const ratioY = parseFloat(marker.dataset.ratioY || "0.5");
-          setPosition(marker, ratioX * width, ratioY * height);
-        }};
-
-        const emitState = (eventType, activeId) => {{
-          const width = Math.round(stage.clientWidth || 0);
-          const height = Math.round(stage.clientHeight || 0);
-          const points = markers.map((marker) => ({{
-            id: marker.dataset.id,
-            label: marker.dataset.label,
-            x_px: parseFloat(marker.dataset.left || "0"),
-            y_px: parseFloat(marker.dataset.top || "0"),
-            x_ratio: parseFloat(marker.dataset.ratioX || "0"),
-            y_ratio: parseFloat(marker.dataset.ratioY || "0"),
-          }}));
-          emitValue({{
-            event: eventType,
-            active_id: activeId || null,
-            stage: {{ width, height }},
-            points,
-          }});
-        }};
-
-        const updatePlanes = () => {{
-          if (!planesSvg) {{
-            return;
-          }}
-          const width = stage.clientWidth || 0;
-          const height = stage.clientHeight || 0;
-          planesSvg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
-          planesSvg.setAttribute("width", width);
-          planesSvg.setAttribute("height", height);
-          planeLines.forEach((entry) => {{
-            const plane = entry.plane;
-            const line = entry.line;
-            const startMarker = markerById[plane.start];
-            const endMarker = markerById[plane.end];
-            if (!startMarker || !endMarker) {{
-              line.style.opacity = 0;
-              return;
-            }}
-            line.style.opacity = 1;
-            line.setAttribute("x1", startMarker.dataset.left || "0");
-            line.setAttribute("y1", startMarker.dataset.top || "0");
-            line.setAttribute("x2", endMarker.dataset.left || "0");
-            line.setAttribute("y2", endMarker.dataset.top || "0");
-          }});
-        }};
-
-        const updateMarkerLabel = (marker) => {{
-          if (!showLabels) {{
-            return;
-          }}
-          const labelEl = marker.querySelector(".label");
-          if (!labelEl) {{
-            return;
-          }}
-          const baseLabel = marker.dataset.baseLabel || marker.dataset.id || "";
-          const x = Math.round(parseFloat(marker.dataset.left || "0"));
-          const y = Math.round(parseFloat(marker.dataset.top || "0"));
-          labelEl.textContent = `${{baseLabel}} (${{x}}, ${{y}})`;
-        }};
-
-        const createMarker = (pt) => {{
-          const marker = document.createElement("div");
-          marker.className = "ceph-marker";
-          marker.dataset.id = pt.id;
-          marker.dataset.label = pt.label || pt.id;
-          marker.dataset.baseLabel = pt.label || pt.id;
-          marker.dataset.ratioX = typeof pt.ratio_x === "number" ? pt.ratio_x : 0.5;
-          marker.dataset.ratioY = typeof pt.ratio_y === "number" ? pt.ratio_y : 0.5;
-          marker.dataset.size = pt.size || defaultSize;
-
-          const pin = document.createElement("div");
-          pin.className = "pin";
-          const size = parseFloat(marker.dataset.size || defaultSize);
-          pin.style.borderLeft = `${{size / 2}}px solid transparent`;
-          pin.style.borderRight = `${{size / 2}}px solid transparent`;
-          pin.style.borderBottom = `${{size}}px solid ${{pt.color || "#f97316"}}`;
-          marker.appendChild(pin);
-
-          if (showLabels) {{
-            const label = document.createElement("div");
-            label.className = "label";
-            marker.appendChild(label);
-          }}
-
-          stage.appendChild(marker);
-          markers.push(marker);
-          markerById[pt.id] = marker;
-
-          marker.addEventListener("pointerdown", (event) => {{
-            const stageRect = stage.getBoundingClientRect();
-            const left = parseFloat(marker.dataset.left || "0");
-            const top = parseFloat(marker.dataset.top || "0");
-            dragOffset.x = event.clientX - (stageRect.left + left);
-            dragOffset.y = event.clientY - (stageRect.top + top);
-            activeMarker = marker;
-            marker.classList.add("dragging");
-            try {{
-              marker.setPointerCapture(event.pointerId);
-            }} catch (err) {{}}
-            coords.textContent = `${{marker.dataset.baseLabel}}: x=${{Math.round(left)}}, y=${{Math.round(top)}}`;
-            updateMarkerLabel(marker);
-            event.preventDefault();
-          }});
-        }};
-
-        payload.points.forEach(createMarker);
-
-        planeDefs.forEach(function(plane) {{
-          const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-          line.setAttribute("stroke", plane.color || "#fde047");
-          line.setAttribute("stroke-width", plane.width || 2);
-          line.setAttribute("stroke-linecap", "round");
-          if (plane.dash) {{
-            line.setAttribute("stroke-dasharray", plane.dash);
-          }}
-          line.setAttribute("data-plane-id", plane.id || "");
-          line.style.opacity = 0;
-          planesSvg.appendChild(line);
-          planeLines.push({{ plane: plane, line: line }});
-        }});
-
-        const updateLayout = () => {{
-          markers.forEach(setFromRatios);
-          updatePlanes();
-          coords.textContent = "位置情報を取得しました。";
-          emitState("layout", null);
-        }};
-
-        const handlePointerMove = (event) => {{
-          if (!activeMarker) {{
-            return;
-          }}
-          const stageRect = stage.getBoundingClientRect();
-          const left = event.clientX - stageRect.left - dragOffset.x;
-          const top = event.clientY - stageRect.top - dragOffset.y;
-          setPosition(activeMarker, left, top);
-          updatePlanes();
-          coords.textContent = `${{activeMarker.dataset.baseLabel}}: x=${{Math.round(parseFloat(activeMarker.dataset.left || "0"))}}, y=${{Math.round(parseFloat(activeMarker.dataset.top || "0"))}}`;
-          event.preventDefault();
-        }};
-
-        const stopDragging = (eventType) => (event) => {{
-          if (!activeMarker) {{
-            return;
-          }}
-          try {{
-            activeMarker.releasePointerCapture(event.pointerId);
-          }} catch (err) {{}}
-          const activeId = activeMarker.dataset.id;
-          activeMarker.classList.remove("dragging");
-          coords.textContent = `${{activeMarker.dataset.baseLabel}}: x=${{Math.round(parseFloat(activeMarker.dataset.left || "0"))}}, y=${{Math.round(parseFloat(activeMarker.dataset.top || "0"))}}`;
-          updatePlanes();
-          activeMarker = null;
-          emitState(eventType, activeId);
-        }};
-
-        window.addEventListener("pointermove", handlePointerMove, {{ passive: false }});
-        window.addEventListener("pointerup", stopDragging("pointerup"), {{ passive: false }});
-        window.addEventListener("pointercancel", stopDragging("pointercancel"), {{ passive: false }});
-        window.addEventListener("resize", () => {{
-          updateLayout();
-          coords.textContent = "レイアウトを再調整しました。";
-        }});
-
-        const ensureReady = () => {{
-          if (image.complete && image.naturalWidth) {{
-            updateLayout();
-          }} else {{
-            image.addEventListener("load", updateLayout, {{ once: true }});
-          }}
-        }};
-
-        ensureReady();
-        emitState("init", null);
-      }})();
-    </script>
-    """
-
-    return components.html(html, height=820, scrolling=False)
+    payload = build_component_payload(image_data_url, marker_size, show_labels, point_state)
+    return ceph_component(
+        image_data_url=payload["image_data_url"],
+        marker_size=payload["marker_size"],
+        show_labels=payload["show_labels"],
+        points=payload["points"],
+        planes=payload["planes"],
+        angles=payload["angles"],
+        polygons=payload["polygons"],
+        key="ceph-component",
+    )
 
 
 def angle_between(p1: Tuple[float, float], p2: Tuple[float, float], p3: Tuple[float, float], p4: Tuple[float, float]) -> float:
@@ -551,7 +396,10 @@ def compute_angles(points_px: Dict[str, Tuple[float, float]]) -> Dict[str, float
         if a1 not in points_px or a2 not in points_px or b1 not in points_px or b2 not in points_px:
             results[name] = float("nan")
             continue
-        results[name] = angle_between(points_px[a1], points_px[a2], points_px[b1], points_px[b2])
+        value = angle_between(points_px[a1], points_px[a2], points_px[b1], points_px[b2])
+        if name == "Convexity":
+            value = 180.0 - value
+        results[name] = value
     if "SNA" in results and "SNB" in results:
         sna = results.get("SNA")
         snb = results.get("SNB")
@@ -564,7 +412,7 @@ def compute_angles(points_px: Dict[str, Tuple[float, float]]) -> Dict[str, float
     return results
 
 
-def format_float(value: float, digits: int = 2) -> str:
+def format_float(value: Optional[float], digits: int = 2) -> str:
     if value is None or math.isnan(value):
         return "—"
     return f"{value:.{digits}f}"
@@ -649,15 +497,247 @@ def build_points_table(points_px: Dict[str, Tuple[float, float]]) -> List[Dict[s
     rows: List[Dict[str, str]] = []
     for item in CEPH_POINTS:
         pid = item["id"]
-        px = points_px.get(pid, (float("nan"), float("nan")))
+        state_entry = st.session_state.ceph_points.get(pid, {})
+        x_px = state_entry.get("x_px")
+        y_px = state_entry.get("y_px")
+        if x_px is None or y_px is None:
+            px = points_px.get(pid)
+            if px is not None:
+                x_px, y_px = px
         rows.append(
             {
                 "Point": pid,
-                "x (px)": format_float(px[0], digits=1),
-                "y (px)": format_float(px[1], digits=1),
+                "x (px)": format_float(x_px, digits=1),
+                "y (px)": format_float(y_px, digits=1),
             }
         )
     return rows
+
+
+def build_polygon_figure(angles: Dict[str, float]) -> Optional[go.Figure]:
+    """日本人標準枠と測定値ポリゴンを重ねて描画する。"""
+    rows = POLYGON_ROWS
+    labels = [row.label for row in rows]
+    means = [row.mean for row in rows]
+    sds = [row.sd for row in rows]
+    ratios = [row.sd_ratio for row in rows]
+
+    y_positions = list(range(len(rows)))
+    left_base = [-(ratio * SD_PERCENT_SCALE) for ratio in ratios]
+    right_base = [(ratio * SD_PERCENT_SCALE) for ratio in ratios]
+
+    patient_offsets: List[float] = []
+    sigmas: List[Optional[float]] = []
+    for row in rows:
+        if row.sd == 0 or row.mean == 0:
+            patient_offsets.append(0.0)
+            sigmas.append(None)
+            continue
+        value = angles.get(row.label)
+        if value is None or math.isnan(value):
+            patient_offsets.append(0.0)
+            sigmas.append(None)
+            continue
+        sigma = (value - row.mean) / row.sd
+        offset = sigma * row.sd_ratio * SD_PERCENT_SCALE
+        patient_offsets.append(offset)
+        sigmas.append(sigma)
+
+    valid_indices = [idx for idx, sigma in enumerate(sigmas) if sigma is not None]
+
+    fig = go.Figure()
+    max_y = len(rows) - 1
+
+    for idx, label in enumerate(labels):
+        fig.add_shape(
+            type="line",
+            x0=-3.2,
+            x1=3.2,
+            y0=idx,
+            y1=idx,
+            line=dict(color="rgba(148, 163, 184, 0.25)", width=1),
+            layer="below",
+        )
+
+    for x0, x1, color in [
+        (-3, 3, "rgba(148, 163, 184, 0.08)"),
+        (-2, 2, "rgba(148, 163, 184, 0.14)"),
+        (-1, 1, "rgba(148, 163, 184, 0.22)"),
+    ]:
+        fig.add_shape(
+            type="rect",
+            x0=x0,
+            x1=x1,
+            y0=-0.5,
+            y1=max_y + 0.5,
+            line=dict(width=0),
+            fillcolor=color,
+            layer="below",
+        )
+
+    fig.add_shape(
+        type="line",
+        x0=0,
+        x1=0,
+        y0=-0.5,
+        y1=max_y + 0.5,
+        line=dict(color="#475569", width=2),
+        layer="below",
+    )
+
+    base_polygon_x = left_base + right_base[::-1] + [left_base[0]]
+    base_polygon_y = y_positions + y_positions[::-1] + [y_positions[0]]
+    fig.add_trace(
+        go.Scatter(
+            x=base_polygon_x,
+            y=base_polygon_y,
+            fill="toself",
+            fillcolor="rgba(30, 64, 175, 0.25)",
+            line=dict(color="#1e40af", width=2),
+            mode="lines",
+            hoverinfo="skip",
+            showlegend=False,
+            name="標準枠",
+        )
+    )
+
+    patient_polygon_x = patient_offsets + patient_offsets[::-1] + [patient_offsets[0]]
+    patient_polygon_y = y_positions + y_positions[::-1] + [y_positions[0]]
+    fig.add_trace(
+        go.Scatter(
+            x=patient_polygon_x,
+            y=patient_polygon_y,
+            fill="toself",
+            fillcolor="rgba(249, 115, 22, 0.18)",
+            line=dict(color="rgba(249, 115, 22, 0.65)", width=2),
+            mode="lines",
+            hoverinfo="skip",
+            showlegend=False,
+            name="測定値",
+        )
+    )
+
+    sna_index = next((idx for idx, row in enumerate(rows) if row.label == "SNA"), None)
+    sna_value = angles.get("SNA")
+    if (
+        sna_index is not None
+        and sna_index < len(patient_offsets)
+        and sna_value is not None
+        and not math.isnan(sna_value)
+    ):
+        fig.add_trace(
+            go.Scatter(
+                x=[patient_offsets[sna_index]],
+                y=[y_positions[sna_index]],
+                mode="markers+text",
+                marker=dict(color="#ef4444", size=10),
+                text=[f"SNA {sna_value:.2f}°"],
+                textposition="middle right",
+                showlegend=False,
+                hoverinfo="text",
+            )
+        )
+
+    if valid_indices:
+        fig.add_trace(
+            go.Scatter(
+                x=[patient_offsets[i] for i in valid_indices],
+                y=[y_positions[i] for i in valid_indices],
+                mode="markers+text",
+                text=[f"{sigmas[i]:.2f}" for i in valid_indices],
+                textposition="middle right",
+                marker=dict(size=11, color="#f97316", line=dict(color="#0f172a", width=1)),
+                hovertemplate="<b>%{customdata[0]}</b><br>計測値: %{customdata[1]:.2f}°<br>平均: %{customdata[2]:.2f}°<br>SD: %{customdata[3]:.2f}°<br>偏差: %{customdata[4]:.2f} σ<extra></extra>",
+                customdata=[
+                    (rows[i].label, angles.get(rows[i].label, float("nan")), means[i], sds[i], sigmas[i])
+                    for i in valid_indices
+                ],
+                showlegend=False,
+            )
+        )
+
+    for idx, row in enumerate(rows):
+        if row.mean:
+            fig.add_annotation(
+                xref="paper",
+                yref="y",
+                x=1.02,
+                y=idx,
+                text=f"{row.mean:.1f}",
+                showarrow=False,
+                font=dict(size=11, color="#0b3fb3"),
+                align="left",
+            )
+        if row.sd:
+            fig.add_annotation(
+                xref="paper",
+                yref="y",
+                x=1.12,
+                y=idx,
+                text=f"{row.sd:.1f}",
+                showarrow=False,
+                font=dict(size=11, color="#0b3fb3"),
+                align="left",
+            )
+
+    fig.add_annotation(
+        xref="paper",
+        yref="paper",
+        x=1.02,
+        y=1.02,
+        text="平均",
+        showarrow=False,
+        font=dict(size=12, color="#0b3fb3"),
+    )
+    fig.add_annotation(
+        xref="paper",
+        yref="paper",
+        x=1.12,
+        y=1.02,
+        text="SD",
+        showarrow=False,
+        font=dict(size=12, color="#0b3fb3"),
+    )
+
+    fig.add_annotation(
+        x=-1,
+        y=max_y + 0.6,
+        text="−1σ",
+        showarrow=False,
+        font=dict(size=11, color="#1f2937"),
+    )
+    fig.add_annotation(
+        x=1,
+        y=max_y + 0.6,
+        text="+1σ",
+        showarrow=False,
+        font=dict(size=11, color="#1f2937"),
+    )
+
+    fig.update_xaxes(
+        title="標準偏差スケール",
+        range=[-3.2, 3.2],
+        tickmode="array",
+        tickvals=[-3, -2, -1, 0, 1, 2, 3],
+        zeroline=False,
+        showgrid=True,
+        gridcolor="rgba(148, 163, 184, 0.3)",
+    )
+    fig.update_yaxes(
+        tickvals=y_positions,
+        ticktext=labels,
+        autorange="reversed",
+        title=None,
+        showgrid=False,
+    )
+    fig.update_layout(
+        margin=dict(l=32, r=120, t=36, b=24),
+        height=max(420, 36 * len(rows)),
+        plot_bgcolor="rgba(163, 163, 163, 0.25)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        showlegend=False,
+    )
+    return fig
 
 
 def main() -> None:
@@ -670,7 +750,7 @@ def main() -> None:
         st.header("表示設定")
         show_labels = st.checkbox("ポイントラベルを表示", value=True)
         marker_size = st.slider("マーカーサイズ (px)", min_value=12, max_value=48, value=26, step=2)
-        if st.button("ポイント位置を初期値に戻す", use_container_width=True):
+        if st.button("ポイント位置を初期値に戻す", width="stretch"):
             st.session_state.ceph_points = get_default_point_state()
             st.session_state.ceph_stage = {"width": BASE_CANVAS_WIDTH, "height": BASE_CANVAS_HEIGHT}
             st.session_state.ceph_last_event = "reset"
@@ -706,20 +786,51 @@ def main() -> None:
 
     if isinstance(component_value, dict):
         update_state_from_component(component_value)
-
     points_px = build_points_px(st.session_state.ceph_stage, st.session_state.ceph_points)
     angles = compute_angles(points_px)
 
-    left_col, right_col = st.columns([1.3, 0.7])
+    rows = create_results_table(angles)
+    points_table = build_points_table(points_px)
 
-    with left_col:
-        st.markdown("### 計測結果")
-        rows = create_results_table(angles)
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+    plot_col, angles_col, coords_col = st.columns([2.0, 0.65, 0.65])
 
-    with right_col:
-        st.markdown("### 現在の座標 (px)")
-        st.dataframe(build_points_table(points_px), use_container_width=True, hide_index=True, height=400)
+    with plot_col:
+        polygon_fig = build_polygon_figure(angles)
+        if polygon_fig is not None:
+            st.markdown("### 標準偏差ポリゴン")
+            st.plotly_chart(
+                polygon_fig,
+                width="stretch",
+                config={"displayModeBar": False},
+            )
+        else:
+            st.info("ポリゴン図を表示できる計測値がありません。")
+
+    with angles_col:
+        st.markdown("### 角度一覧")
+        slim_angle_rows = [
+            {"項目": row["計測項目"], "角度": row["角度 (°)"]}
+            for row in rows
+        ]
+        st.dataframe(
+            slim_angle_rows,
+            hide_index=True,
+            use_container_width=True,
+            height=420,
+        )
+
+    with coords_col:
+        st.markdown("### 座標一覧 (px)")
+        slim_points_rows = [
+            {"点": row["Point"], "x": row["x (px)"], "y": row["y (px)"]}
+            for row in points_table
+        ]
+        st.dataframe(
+            slim_points_rows,
+            hide_index=True,
+            use_container_width=True,
+            height=420,
+        )
 
         stage = st.session_state.ceph_stage
         st.markdown(
