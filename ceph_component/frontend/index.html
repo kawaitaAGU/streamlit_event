@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body {
+        margin: 0;
+        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: transparent;
+      }
+      .ceph-wrapper {
+        position: relative;
+        width: min(100%, 960px);
+        margin: 0 auto;
+        user-select: none;
+      }
+      #ceph-image {
+        width: 100%;
+        height: auto;
+        display: block;
+        pointer-events: none;
+      }
+      #ceph-stage {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+      }
+      #ceph-polygon-overlay {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+      }
+      #ceph-planes {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+      }
+      .ceph-marker {
+        position: absolute;
+        transform: translate(-50%, 0);
+        cursor: grab;
+        pointer-events: auto;
+        touch-action: none;
+        text-align: center;
+      }
+      .ceph-marker.dragging {
+        cursor: grabbing;
+      }
+      .ceph-marker .pin {
+        width: 0;
+        height: 0;
+        margin: 0 auto;
+      }
+      .ceph-marker .label {
+        margin-top: 4px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #f8fafc;
+        text-shadow: 0 1px 2px rgba(15, 23, 42, 0.8);
+        letter-spacing: 0.04em;
+      }
+      #ceph-hud {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        pointer-events: none;
+      }
+      .ceph-hud-entry {
+        background: rgba(15, 23, 42, 0.68);
+        color: #e2e8f0;
+        padding: 6px 10px;
+        border-radius: 6px;
+        font: 12px/1.4 monospace;
+        white-space: nowrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="ceph-wrapper">
+      <img id="ceph-image" alt="cephalometric background" draggable="false" />
+      <svg id="ceph-planes"></svg>
+      <svg id="ceph-polygon-overlay"></svg>
+      <div id="ceph-stage"></div>
+      <div id="ceph-hud"></div>
+    </div>
+    <script id="ceph-payload" type="application/json">__PAYLOAD_JSON__</script>
+    <script>
+      (function () {
+        const payloadEl = document.getElementById("ceph-payload");
+        let payload = {};
+
+        if (payloadEl) {
+          try {
+            payload = JSON.parse(payloadEl.textContent || "{}");
+          } catch (error) {
+            console.error("Failed to parse payload:", error);
+          }
+        }
+
+        const wrapper = document.querySelector(".ceph-wrapper");
+        const image = document.getElementById("ceph-image");
+        const stage = document.getElementById("ceph-stage");
+        const planesSvg = document.getElementById("ceph-planes");
+        const polygonOverlay = document.getElementById("ceph-polygon-overlay");
+        const hudContainer = document.getElementById("ceph-hud");
+
+        if (!wrapper || !image || !stage || !planesSvg || !polygonOverlay || !hudContainer) {
+          return;
+        }
+
+        const showLabels =
+          payload.show_labels !== undefined
+            ? payload.show_labels
+            : payload.showLabels !== false;
+        const defaultSize =
+          typeof payload.marker_size === "number"
+            ? payload.marker_size
+            : payload.markerSize || 28;
+        const pointsConfig = Array.isArray(payload.points) ? payload.points : [];
+        const planeDefs = Array.isArray(payload.planes) ? payload.planes : [];
+        const polygonDefs = Array.isArray(payload.polygons) ? payload.polygons : [];
+        const frameId = window.frameElement ? window.frameElement.id : "streamlit-frame";
+
+        const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+        const computeMarkerApex = (marker) => {
+          const width = stage.clientWidth || 1;
+          const height = stage.clientHeight || 1;
+          const ratioX = parseFloat(marker.dataset.ratioX || marker.dataset.ratio || "0.5");
+          const ratioY = parseFloat(marker.dataset.ratioY || "0.5");
+          return {
+            x: ratioX * width,
+            y: ratioY * height,
+          };
+        };
+
+        const postMessage = (message) => {
+          if (!window.parent) {
+            return;
+          }
+          window.parent.postMessage(
+            Object.assign(
+              {
+                isStreamlitMessage: true,
+                id: frameId,
+              },
+              message
+            ),
+            "*"
+          );
+        };
+
+        const emitValue = (value) => {
+          postMessage({
+            type: "streamlit:setComponentValue",
+            value,
+          });
+        };
+
+        const markers = [];
+        const markerById = {};
+        const planeLines = [];
+        const polygonMarkerDefs = [];
+        let latestAngleMap = {};
+        const dragOffset = { x: 0, y: 0 };
+        let activeMarker = null;
+
+        const angleDefsRaw = Array.isArray(payload.angles) ? payload.angles : [];
+        const angleDefinitions = angleDefsRaw
+          .map((raw, index) => {
+            const baseId =
+              typeof raw.id === "string" && raw.id.trim().length > 0
+                ? raw.id.trim()
+                : `angle_${index}`;
+            const label =
+              typeof raw.label === "string" && raw.label.trim().length > 0
+                ? raw.label.trim()
+                : baseId;
+            const type = raw.type === "difference" ? "difference" : "segments";
+            if (type === "segments") {
+              const segments = Array.isArray(raw.segments) ? raw.segments : [];
+              if (segments.length !== 2) {
+                return null;
+              }
+              const normalizedSegments = segments.map((segment) => ({
+                start: segment && typeof segment.start === "string" ? segment.start : null,
+                end: segment && typeof segment.end === "string" ? segment.end : null,
+              }));
+              if (
+                normalizedSegments.some(
+                  (segment) =>
+                    !segment ||
+                    typeof segment.start !== "string" ||
+                    typeof segment.end !== "string" ||
+                    segment.start.trim().length === 0 ||
+                    segment.end.trim().length === 0
+                )
+              ) {
+                return null;
+              }
+              return {
+                id: baseId,
+                label,
+                type,
+                segments: normalizedSegments,
+                supplement: Boolean(raw.supplement),
+              };
+            }
+            const minuend =
+              typeof raw.minuend === "string" && raw.minuend.trim().length > 0
+                ? raw.minuend.trim()
+                : null;
+            const subtrahend =
+              typeof raw.subtrahend === "string" && raw.subtrahend.trim().length > 0
+                ? raw.subtrahend.trim()
+                : null;
+            if (!minuend || !subtrahend) {
+              return null;
+            }
+            return {
+              id: baseId,
+              label,
+              type,
+              minuend,
+              subtrahend,
+            };
+          })
+          .filter(Boolean);
+
+        const hudConfig = [
+          ...angleDefinitions.map((definition) => ({
+            id: `angle:${definition.id}`,
+            label: definition.label,
+            el: null,
+            type: "angle",
+            definition,
+            fallback: `${definition.label}: 計算待ち…`,
+          })),
+          ...pointsConfig.map((pt) => ({
+            id: pt.id,
+            label: pt.label || pt.id,
+            el: null,
+            type: "point",
+            fallback: `${pt.label || pt.id} の座標を選択してください。`,
+          })),
+        ];
+
+        const hudState = {};
+        const hudEntryById = {};
+
+        hudConfig.forEach((entry) => {
+          const el = document.createElement("div");
+          el.className = "ceph-hud-entry";
+          if (entry.type === "angle") {
+            el.textContent = entry.fallback;
+          } else {
+            el.textContent = `${entry.label}: 座標未選択`;
+          }
+          hudContainer.appendChild(el);
+          entry.el = el;
+          hudState[entry.id] = null;
+          hudEntryById[entry.id] = entry;
+        });
+
+        const angleHudEntries = hudConfig.filter((entry) => entry.type === "angle");
+
+        const setHudEntry = (entry, data) => {
+          if (!entry || !entry.el) {
+            return;
+          }
+          if (entry.type === "angle") {
+            if (!data || data.current == null || Number.isNaN(data.current)) {
+              entry.el.textContent = entry.fallback;
+              return;
+            }
+            const currentText = `${entry.label}: ${data.current.toFixed(2)}°`;
+            const previous =
+              data.previous == null || Number.isNaN(data.previous)
+                ? ""
+                : ` (Prev ${data.previous.toFixed(2)}°)`;
+            entry.el.textContent = `${currentText}${previous}`;
+            return;
+          }
+          if (!data) {
+            entry.el.textContent = entry.fallback;
+            return;
+          }
+          const x = Math.round(
+            parseFloat(data.dataset.apexX || data.dataset.left || "0")
+          );
+          const y = Math.round(
+            parseFloat(data.dataset.apexY || data.dataset.top || "0")
+          );
+          const prefix = data.dataset.baseLabel || data.dataset.id || "";
+          entry.el.textContent = `${prefix}: x=${x}, y=${y}`;
+        };
+
+        const refreshHud = () => {
+          hudConfig.forEach((entry) => {
+            setHudEntry(entry, hudState[entry.id]);
+          });
+        };
+
+        const updateHudForMarker = (marker) => {
+          const entry = hudEntryById[marker.dataset.id];
+          if (!entry || entry.type !== "point") {
+            return false;
+          }
+          hudState[entry.id] = marker;
+          setHudEntry(entry, marker);
+          return true;
+        };
+
+        const ANGLE_EPSILON = 1e-4;
+
+        const pointFromMarker = (marker) => ({
+          x: parseFloat(marker.dataset.apexX || marker.dataset.left || "0"),
+          y: parseFloat(marker.dataset.apexY || marker.dataset.top || "0"),
+        });
+
+        const updateAngleState = (entry, value) => {
+          if (!entry) {
+            return;
+          }
+          if (value == null || Number.isNaN(value)) {
+            hudState[entry.id] = null;
+            setHudEntry(entry, null);
+            return;
+          }
+          const prevState = hudState[entry.id];
+          let previousValue = null;
+          if (prevState && prevState.current != null) {
+            if (Math.abs(prevState.current - value) > ANGLE_EPSILON) {
+              previousValue = prevState.current;
+            } else if (prevState.previous != null) {
+              previousValue = prevState.previous;
+            }
+          } else if (prevState && prevState.previous != null) {
+            previousValue = prevState.previous;
+          }
+          const nextState = {
+            current: value,
+            previous: previousValue,
+          };
+          hudState[entry.id] = nextState;
+          setHudEntry(entry, nextState);
+        };
+
+        const computeSegmentsAngle = (definition) => {
+          const segmentA = definition.segments[0];
+          const segmentB = definition.segments[1];
+          const markerA1 = markerById[segmentA.start];
+          const markerA2 = markerById[segmentA.end];
+          const markerB1 = markerById[segmentB.start];
+          const markerB2 = markerById[segmentB.end];
+          if (!markerA1 || !markerA2 || !markerB1 || !markerB2) {
+            return Number.NaN;
+          }
+          const pointA1 = pointFromMarker(markerA1);
+          const pointA2 = pointFromMarker(markerA2);
+          const pointB1 = pointFromMarker(markerB1);
+          const pointB2 = pointFromMarker(markerB2);
+          const vector = (p1, p2) => ({ x: p1.x - p2.x, y: p1.y - p2.y });
+          const dot = (v1, v2) => v1.x * v2.x + v1.y * v2.y;
+          const magnitude = (v) => Math.hypot(v.x, v.y);
+          const vecA = vector(pointA1, pointA2);
+          const vecB = vector(pointB1, pointB2);
+          const magA = magnitude(vecA);
+          const magB = magnitude(vecB);
+          if (magA === 0 || magB === 0) {
+            return Number.NaN;
+          }
+          let cosTheta = dot(vecA, vecB) / (magA * magB);
+          cosTheta = Math.min(1, Math.max(-1, cosTheta));
+          let angle = (Math.acos(cosTheta) * 180) / Math.PI;
+          if (definition.supplement) {
+            angle = 180 - angle;
+          }
+          return angle;
+        };
+
+        const updateAngles = () => {
+          if (angleHudEntries.length === 0) {
+            return;
+          }
+          const angleValueMap = {};
+          angleHudEntries.forEach((entry) => {
+            const prevState = hudState[entry.id];
+            if (prevState && prevState.current != null) {
+              angleValueMap[entry.definition.id] = prevState.current;
+            }
+          });
+          angleHudEntries
+            .filter((entry) => entry.definition.type === "segments")
+            .forEach((entry) => {
+              const value = computeSegmentsAngle(entry.definition);
+              angleValueMap[entry.definition.id] = value;
+              updateAngleState(entry, value);
+            });
+          angleHudEntries
+            .filter((entry) => entry.definition.type === "difference")
+            .forEach((entry) => {
+              const definition = entry.definition;
+              const minuend = angleValueMap[definition.minuend];
+              const subtrahend = angleValueMap[definition.subtrahend];
+              const value =
+                minuend == null ||
+                Number.isNaN(minuend) ||
+                subtrahend == null ||
+                Number.isNaN(subtrahend)
+                  ? Number.NaN
+                  : minuend - subtrahend;
+              angleValueMap[definition.id] = value;
+              updateAngleState(entry, value);
+            });
+          latestAngleMap = angleValueMap;
+          updatePolygonMarkers(angleValueMap);
+        };
+
+        const updateMarkerLabel = (marker) => {
+          const labelEl = marker.querySelector(".label");
+          if (!labelEl) {
+            return;
+          }
+          const base = marker.dataset.baseLabel || marker.dataset.id || "";
+          const x = Math.round(
+            parseFloat(marker.dataset.apexX || marker.dataset.left || "0")
+          );
+          const y = Math.round(
+            parseFloat(marker.dataset.apexY || marker.dataset.top || "0")
+          );
+          labelEl.textContent = `${base} (${x}, ${y})`;
+        };
+
+        const setPosition = (marker, apexX, apexY) => {
+          const width = stage.clientWidth || 1;
+          const height = stage.clientHeight || 1;
+          const sizeValue = parseFloat(marker.dataset.size || defaultSize || 28);
+          const size = Number.isFinite(sizeValue) ? sizeValue : 28;
+          const clampedApexX = clamp(apexX, 0, width);
+          const clampedApexY = clamp(apexY, 0, height);
+          const maxTop = Math.max(height - size, 0);
+          const topPosition = clamp(clampedApexY - size, 0, maxTop);
+          marker.style.left = `${clampedApexX}px`;
+          marker.style.top = `${topPosition}px`;
+          const apexYCorrected = topPosition + size;
+          marker.dataset.left = String(clampedApexX);
+          marker.dataset.top = String(apexYCorrected);
+          marker.dataset.apexX = String(clampedApexX);
+          marker.dataset.apexY = String(apexYCorrected);
+          marker.dataset.ratioX = width ? clampedApexX / width : 0;
+          marker.dataset.ratioY = height ? apexYCorrected / height : 0;
+          updateMarkerLabel(marker);
+          updateHudForMarker(marker);
+          updateAngles();
+        };
+
+        const setFromRatios = (marker) => {
+          const width = stage.clientWidth || 1;
+          const height = stage.clientHeight || 1;
+          const ratioX = parseFloat(marker.dataset.ratioX || "0.5");
+          const ratioY = parseFloat(marker.dataset.ratioY || "0.5");
+          setPosition(marker, ratioX * width, ratioY * height);
+        };
+
+        const renderPolygons = () => {
+          if (!polygonOverlay) {
+            return;
+          }
+          const width = stage.clientWidth || 0;
+          const height = stage.clientHeight || 0;
+          polygonOverlay.setAttribute("viewBox", `0 0 ${width} ${height}`);
+          polygonOverlay.setAttribute("width", width);
+          polygonOverlay.setAttribute("height", height);
+          polygonOverlay.innerHTML = "";
+          polygonMarkerDefs.length = 0;
+
+          polygonDefs.forEach((polygon) => {
+            const points = Array.isArray(polygon.points) ? polygon.points : [];
+            const pointsAttr = points
+              .map((pt) => {
+                const nx = Number(pt && pt.x != null ? pt.x : 0);
+                const ny = Number(pt && pt.y != null ? pt.y : 0);
+                return `${nx * width},${ny * height}`;
+              })
+              .join(" ");
+            const polygonEl = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+            polygonEl.setAttribute("points", pointsAttr);
+            polygonEl.setAttribute("fill", polygon.fill || "rgba(30, 64, 175, 0.28)");
+            polygonEl.setAttribute("stroke", polygon.stroke || "#1e40af");
+            polygonEl.setAttribute("stroke-width", polygon.stroke_width || 2);
+            polygonEl.setAttribute("stroke-linejoin", "round");
+            polygonOverlay.appendChild(polygonEl);
+
+            const markers = Array.isArray(polygon.markers) ? polygon.markers : [];
+            markers.forEach((marker) => {
+              const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+              const position = marker.position || {};
+              const nx = Number(position.x != null ? position.x : 0);
+              const ny = Number(position.y != null ? position.y : 0);
+              circle.setAttribute("cx", nx * width);
+              circle.setAttribute("cy", ny * height);
+              const radius = Number(marker.size) || 8;
+              circle.setAttribute("r", radius);
+              circle.setAttribute("fill", marker.color || "#ef4444");
+              if (marker.stroke_width) {
+                circle.setAttribute("stroke-width", marker.stroke_width);
+              }
+              if (marker.stroke) {
+                circle.setAttribute("stroke", marker.stroke);
+              }
+              polygonOverlay.appendChild(circle);
+              polygonMarkerDefs.push({
+                element: circle,
+                polygon,
+                marker,
+              });
+            });
+          });
+        };
+
+        const updatePolygonMarkers = (angleValueMap) => {
+          if (!polygonOverlay || polygonMarkerDefs.length === 0) {
+            return;
+          }
+          const width = stage.clientWidth || 0;
+          const height = stage.clientHeight || 0;
+          polygonMarkerDefs.forEach(({ element, polygon, marker }) => {
+            if (!element) {
+              return;
+            }
+            const position = marker.position || {};
+            let normalizedX = Number(position.x != null ? position.x : 0);
+            const normalizedY = Number(position.y != null ? position.y : 0);
+            const mapping = polygon.mapping || {};
+            const angleId = marker.angle_id;
+            const angleValue =
+              angleValueMap && angleId && Object.prototype.hasOwnProperty.call(angleValueMap, angleId)
+                ? angleValueMap[angleId]
+                : undefined;
+            const mean = Number(marker.mean);
+            const sd = Number(marker.sd);
+            const sdRatio = Number(marker.sd_ratio);
+            const sdScale = Number(marker.sd_scale) || 1;
+            const xMin = Number(mapping.x_min);
+            const xMax = Number(mapping.x_max);
+            const overlayXMin = Number(mapping.overlay_x_min);
+            const overlayXMax = Number(mapping.overlay_x_max);
+            if (
+              angleValue != null &&
+              !Number.isNaN(angleValue) &&
+              !Number.isNaN(mean) &&
+              sd != null &&
+              !Number.isNaN(sd) &&
+              sd !== 0 &&
+              !Number.isNaN(sdRatio) &&
+              overlayXMax > overlayXMin &&
+              xMax > xMin
+            ) {
+              let sigma = (angleValue - mean) / sd;
+              let offset = sigma * sdRatio * sdScale;
+              offset = Math.max(xMin, Math.min(xMax, offset));
+              const fraction = (offset - xMin) / (xMax - xMin);
+              normalizedX = overlayXMin + fraction * (overlayXMax - overlayXMin);
+            }
+            element.setAttribute("cx", normalizedX * width);
+            element.setAttribute("cy", normalizedY * height);
+          });
+        };
+
+        const updatePlanes = () => {
+          const width = stage.clientWidth || 0;
+          const height = stage.clientHeight || 0;
+          planesSvg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+          planesSvg.setAttribute("width", width);
+          planesSvg.setAttribute("height", height);
+          planeLines.forEach(({ plane, line }) => {
+            const startMarker = markerById[plane.start];
+            const endMarker = markerById[plane.end];
+            if (!startMarker || !endMarker) {
+              line.style.opacity = 0;
+              return;
+            }
+            line.style.opacity = 1;
+            const startApex = computeMarkerApex(startMarker);
+            const endApex = computeMarkerApex(endMarker);
+            line.setAttribute("x1", startApex.x);
+            line.setAttribute("y1", startApex.y);
+            line.setAttribute("x2", endApex.x);
+            line.setAttribute("y2", endApex.y);
+          });
+        };
+
+        const emitState = (eventType, activeId) => {
+          const width = Math.round(stage.clientWidth || 0);
+          const height = Math.round(stage.clientHeight || 0);
+          const points = markers.map((marker) => {
+            const apex = computeMarkerApex(marker);
+            return {
+              id: marker.dataset.id,
+              label: marker.dataset.label,
+              x_px: apex.x,
+              y_px: apex.y,
+              x_ratio: parseFloat(marker.dataset.ratioX || "0"),
+              y_ratio: parseFloat(marker.dataset.ratioY || "0"),
+            };
+          });
+          emitValue({
+            event: eventType,
+            active_id: activeId || null,
+            stage: { width, height },
+            points,
+          });
+        };
+
+        const createMarker = (pt) => {
+          const marker = document.createElement("div");
+          marker.className = "ceph-marker";
+          marker.dataset.id = pt.id;
+          marker.dataset.label = pt.label || pt.id;
+          marker.dataset.baseLabel = pt.label || pt.id;
+          marker.dataset.ratioX =
+            typeof pt.ratio_x === "number"
+              ? pt.ratio_x
+              : parseFloat(pt.ratio_x || "0.5");
+          marker.dataset.ratioY =
+            typeof pt.ratio_y === "number"
+              ? pt.ratio_y
+              : parseFloat(pt.ratio_y || "0.5");
+          marker.dataset.size = String(pt.size || defaultSize);
+          marker.dataset.apexX = String(pt.default_x != null ? pt.default_x : ratioX * (stage.clientWidth || BASE_CANVAS_WIDTH || 800));
+          marker.dataset.apexY = String(pt.default_y != null ? pt.default_y : ratioY * (stage.clientHeight || BASE_CANVAS_HEIGHT || 750));
+
+          const pin = document.createElement("div");
+          pin.className = "pin";
+          const size = parseFloat(marker.dataset.size || defaultSize);
+          pin.style.borderLeft = `${size / 2}px solid transparent`;
+          pin.style.borderRight = `${size / 2}px solid transparent`;
+          pin.style.borderBottom = `${size}px solid ${pt.color || "#f97316"}`;
+          marker.appendChild(pin);
+
+          if (showLabels) {
+            const label = document.createElement("div");
+            label.className = "label";
+          marker.appendChild(label);
+        }
+
+        stage.appendChild(marker);
+        markers.push(marker);
+        markerById[pt.id] = marker;
+        updateMarkerLabel(marker);
+
+        marker.addEventListener("pointerdown", (event) => {
+          const rect = stage.getBoundingClientRect();
+          const apex = computeMarkerApex(marker);
+          dragOffset.x = event.clientX - (rect.left + apex.x);
+          dragOffset.y = event.clientY - (rect.top + apex.y);
+          activeMarker = marker;
+          marker.classList.add("dragging");
+          try {
+            marker.setPointerCapture(event.pointerId);
+          } catch (error) {
+              /* ignore */
+            }
+            if (!updateHudForMarker(marker)) {
+              refreshHud();
+            }
+            updateAngles();
+            emitState("pointerdown", marker.dataset.id);
+            event.preventDefault();
+          });
+        };
+
+        pointsConfig.forEach((pt) => createMarker(pt));
+
+        planeDefs.forEach((plane) => {
+          const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+          line.setAttribute("stroke", plane.color || "#fde047");
+          line.setAttribute("stroke-width", plane.width || 2);
+          line.setAttribute("stroke-linecap", "round");
+          if (plane.dash) {
+            line.setAttribute("stroke-dasharray", plane.dash);
+          }
+          line.setAttribute("data-plane-id", plane.id || "");
+          line.style.opacity = 0;
+          planesSvg.appendChild(line);
+          planeLines.push({ plane, line });
+        });
+
+        const updateLayout = () => {
+          markers.forEach(setFromRatios);
+          updatePlanes();
+          renderPolygons();
+          updateAngles();
+          refreshHud();
+          emitState("layout", null);
+        };
+
+        const handlePointerMove = (event) => {
+          if (!activeMarker) {
+            return;
+          }
+          const rect = stage.getBoundingClientRect();
+          const apexLeft = event.clientX - rect.left - dragOffset.x;
+          const apexTop = event.clientY - rect.top - dragOffset.y;
+          setPosition(activeMarker, apexLeft, apexTop);
+          updatePlanes();
+          if (!updateHudForMarker(activeMarker)) {
+            refreshHud();
+          }
+          emitState("drag", activeMarker.dataset.id);
+          event.preventDefault();
+        };
+
+        const stopDragging = (eventType) => (event) => {
+          if (!activeMarker) {
+            return;
+          }
+          try {
+            activeMarker.releasePointerCapture(event.pointerId);
+          } catch (error) {
+            /* ignore */
+          }
+          const activeId = activeMarker.dataset.id;
+          activeMarker.classList.remove("dragging");
+          updateMarkerLabel(activeMarker);
+          updatePlanes();
+          if (!updateHudForMarker(activeMarker)) {
+            refreshHud();
+          }
+          emitState(eventType, activeId);
+          activeMarker = null;
+        };
+
+        window.addEventListener("pointermove", handlePointerMove, { passive: false });
+        window.addEventListener("pointerup", stopDragging("pointerup"), {
+          passive: false,
+        });
+        window.addEventListener("pointercancel", stopDragging("pointercancel"), {
+          passive: false,
+        });
+        window.addEventListener("resize", () => {
+          updateLayout();
+        });
+
+        const ensureReady = () => {
+          if (image.complete && image.naturalWidth) {
+            updateLayout();
+          } else if (image.src) {
+            image.addEventListener("load", updateLayout, { once: true });
+            image.addEventListener(
+              "error",
+              () => {
+                updateLayout();
+              },
+              { once: true }
+            );
+          } else {
+            updateLayout();
+          }
+        };
+
+        image.src = payload.image_data_url || payload.image || "";
+        ensureReady();
+        emitState("init", null);
+      })();
+    </script>
+  </body>
+</html>
