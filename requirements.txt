@@ -1,2 +1,5 @@
-streamlit>=1.36.0
 pillow>=10.0.0
+streamlit>=1.37.0
+plotly>=5.24.0
+pandas>=2.2.0
+dataclasses; python_version<"3.7"
