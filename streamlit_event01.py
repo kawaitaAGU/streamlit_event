@@ -250,8 +250,8 @@ def build_component_payload(
     y_positions = list(range(len(polygon_rows)))
     left_base = [-(ratio * SD_PERCENT_SCALE) for ratio in ratios]
     right_base = [(ratio * SD_PERCENT_SCALE) for ratio in ratios]
-    base_polygon_x = left_base + right_base[::-1] + [left_base[0]]
-    base_polygon_y = y_positions + y_positions[::-1] + [y_positions[0]]
+    base_polygon_x = left_base[1:] + right_base[::-1][:-1] + [left_base[1]]
+    base_polygon_y = y_positions[1:] + y_positions[::-1][:-1] + [y_positions[1]]
     x_min, x_max = -3.2, 3.2
     overlay_x_min, overlay_x_max = 0.21, 0.53
     overlay_y_top, overlay_y_bottom = 0.82, 0.18
@@ -270,44 +270,28 @@ def build_component_payload(
         for x_value, y_value in zip(base_polygon_x, base_polygon_y)
     ]
 
-    angle_marker_colors = [
-        "#ef4444",
-        "#6366f1",
-        "#10b981",
-        "#f59e0b",
-        "#3b82f6",
-        "#ec4899",
-        "#22d3ee",
-        "#84cc16",
-        "#f97316",
-        "#14b8a6",
-        "#8b5cf6",
-        "#eab308",
-        "#0ea5e9",
-    ]
-
     polygon_markers: List[Dict[str, Any]] = []
-    for idx, row in enumerate(polygon_rows):
-        if row.sd == 0 or row.label in {"00", "01", "ZZ"}:
-            continue
-        base_offset = 0.0
-        color = angle_marker_colors[idx % len(angle_marker_colors)]
+    try:
+        sna_index = next(idx for idx, row in enumerate(polygon_rows) if row.label == "SNA")
+        sna_row = polygon_rows[sna_index]
         polygon_markers.append(
             {
-                "id": f"marker_{row.label}",
-                "angle_id": row.label,
-                "color": color,
-                "size": 9,
-                "mean": row.mean,
-                "sd": row.sd,
-                "sd_ratio": row.sd_ratio,
+                "id": "SNA",
+                "angle_id": "SNA",
+                "color": "#ef4444",
+                "size": 10,
+                "mean": sna_row.mean,
+                "sd": sna_row.sd,
+                "sd_ratio": sna_row.sd_ratio,
                 "sd_scale": SD_PERCENT_SCALE,
                 "position": {
-                    "x": map_x(base_offset),
-                    "y": map_y(idx),
+                    "x": map_x((left_base[sna_index] + right_base[sna_index]) / 2),
+                    "y": map_y(y_positions[sna_index]),
                 },
             }
         )
+    except StopIteration:
+        pass
 
     angles_payload: List[Dict[str, Any]] = [
         {
@@ -342,8 +326,6 @@ def build_component_payload(
                 "color": item["color"],
                 "ratio_x": float(point_state.get(item["id"], {}).get("x_ratio", 0.5)),
                 "ratio_y": float(point_state.get(item["id"], {}).get("y_ratio", 0.5)),
-                "default_x": float(point_state.get(item["id"], {}).get("x_px", item["default"][0])),
-                "default_y": float(point_state.get(item["id"], {}).get("y_px", item["default"][1])),
             }
             for item in CEPH_POINTS
         ],
