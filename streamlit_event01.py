@@ -1,4 +1,4 @@
-# CEF22.py — single-canvas, angle-stack scales with image width (plan ②)
+# CEF22.py — single-canvas, angle-stack scales with image width (plan ②) + triangle initials
 
 import json
 import streamlit as st
@@ -97,7 +97,15 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       .ceph-marker{position:absolute;transform:translate(-50%,0);cursor:grab;}
       .ceph-marker.dragging{cursor:grabbing;}
       .ceph-marker .pin{width:0;height:0;margin:0 auto;}
-      .ceph-label{margin-top:2px;font-size:11px;font-weight:700;color:#f8fafc;text-shadow:0 1px 2px rgba(0,0,0,.6);}
+
+      /* ★ 略号ラベル（三角のすぐ上） */
+      .mark-label{
+        position:absolute;left:50%;transform:translate(-50%,-6px);
+        padding:2px 6px;border-radius:8px;
+        font-size:11px;font-weight:700;line-height:1;
+        color:#e5efff;background:rgba(15,23,42,.85);
+        white-space:nowrap;pointer-events:none;text-shadow:0 1px 2px rgba(0,0,0,.35);
+      }
       
       /* 座標ラベル */
       .coord-tag{position:absolute;transform:translate(6px,-16px);background:rgba(15,23,42,.78);
@@ -120,6 +128,12 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       const ANGLE_STACK_BASE_WIDTH = __ANGLE_STACK_BASE_WIDTH__;
       const payload = __PAYLOAD_JSON__;
 
+      // ★ フォールバック略号（payload.points[i].label が無いとき用）
+      const LABEL_FALLBACK = {
+        "S":"S","N":"N","A":"A","B":"B","Pog":"Pog","Po":"Po","Or":"Or","Ar":"Ar","Pm":"Pm","Me":"Me","Am":"Am",
+        "U1":"U1","U1r":"U1r","L1":"L1","L1r":"L1r"
+      };
+
       (function(){
         const wrapper = document.querySelector(".ceph-wrapper");
         const image   = document.getElementById("ceph-image");
@@ -128,11 +142,9 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         const overlaySvg= document.getElementById("ceph-overlay");
         const angleStack= document.getElementById("angle-stack");
 
-        // 角度カラム参照
         const angleRows = Array.from(document.querySelectorAll("#angle-stack .angle-row"));
         const angleRowMap = Object.fromEntries(angleRows.map(r => [r.dataset.angle, {row:r, valueEl:r.querySelector(".angle-value")}]))
 
-        // マーカー＆プレーン
         const markers=[], markerById={}, planeDefs=(payload.planes||[]), planeLines=[];
         let activeMarker=null, dragOffset={x:0,y:0};
         const coordTags = new Map(); // id -> DOM
@@ -199,12 +211,21 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         function createMarker(pt){
           const m=document.createElement("div"); m.className="ceph-marker"; m.dataset.id=pt.id;
           const s=pt.size||28;
+
+          // 三角（pin）
           const pin=document.createElement("div"); pin.className="pin";
           pin.style.borderLeft=(s/2)+"px solid transparent";
           pin.style.borderRight=(s/2)+"px solid transparent";
           pin.style.borderBottom=s+"px solid "+(pt.color||"#f97316");
           m.appendChild(pin);
 
+          // ★ 略号ラベル
+          const label = document.createElement("div");
+          label.className = "mark-label";
+          label.textContent = pt.label || LABEL_FALLBACK[pt.id] || pt.id || "";
+          m.appendChild(label);
+
+          // 初期位置
           if (typeof pt.x_px==="number" && typeof pt.y_px==="number"){
             m.dataset.initPlaced="1"; m.dataset.left=pt.x_px; m.dataset.top=pt.y_px;
           } else if (typeof pt.x==="number" && typeof pt.y==="number") {
@@ -302,7 +323,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             const label = POLYGON_ROWS[i][0];
 
             if(label==="01"){
-              // 直前直後の実データ行の中点
               let prevY=null, nextY=null;
               for(let p=i-1;p>=0;p--){
                 const lab=POLYGON_ROWS[p][0];
@@ -346,7 +366,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           const g=document.createElementNS("http://www.w3.org/2000/svg","g");
           overlaySvg.appendChild(g);
 
-          // 外形
           const pts=[];
           for(let i=0;i<POLYGON_ROWS.length;i++) pts.push(leftXs[i]+","+ys[i]);
           for(let i=POLYGON_ROWS.length-1;i>=0;i--) pts.push(rightXs[i]+","+ys[i]);
@@ -354,13 +373,11 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           poly.setAttribute("id","std-poly-outline"); poly.setAttribute("points", pts.join(" "));
           g.appendChild(poly);
 
-          // 中心線
           const center=document.createElementNS("http://www.w3.org/2000/svg","line");
           center.setAttribute("x1",offsetX); center.setAttribute("x2",offsetX);
           center.setAttribute("y1",ys[0]); center.setAttribute("y2",ys[ys.length-1]);
           center.setAttribute("class","std-centerline"); g.appendChild(center);
 
-          // 水平白線（ダミー除外）
           POLYGON_ROWS.forEach((row,i)=>{
             const label=row[0]; if(label==="00"||label==="01"||label==="ZZ") return;
             const hl=document.createElementNS("http://www.w3.org/2000/svg","line");
@@ -369,7 +386,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             hl.setAttribute("class","std-hline"); g.appendChild(hl);
           });
 
-          // 赤丸（ダミー除外）
           const dots=document.createElementNS("http://www.w3.org/2000/svg","g"); dots.setAttribute("id","std-value-dots"); g.appendChild(dots);
           POLYGON_ROWS.forEach((row,i)=>{
             const label=row[0]; if(label==="00"||label==="01"||label==="ZZ") return;
@@ -405,7 +421,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         function updateLayout(){
           const w=image.clientWidth||0, h=image.clientHeight||0;
           stage.style.width=w+"px"; stage.style.height=h+"px";
-          syncAngleStackScale();                 // ★ 画像幅に合わせて角度カラムをscale
+          syncAngleStackScale();
           placeInitMarkersOnce(); initPlanes(); updatePlanes(); updateAngleStack(); redrawPolygonAndDots();
         }
 
@@ -439,7 +455,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
     return components.html(html, height=1100, scrolling=False)
 
 def main():
-    # CEF03 の UI は使わず、描画コンポーネントだけ差し替える
     base.render_ceph_component = render_ceph_component
     base.main()
 
