@@ -1,12 +1,13 @@
-# CEF23.py — single-canvas + pinch-zoom & pan, accurate drag with inverse transform
+# CEF23.py — single-canvas, angle-stack scales with image width (plan ②) + marker labels
+
 import json
 import streamlit as st
 import streamlit.components.v1 as components
-import CEF03 as base  # 画像/ポイント/プレーンのペイロード構築のみ使用
+import CEF03 as base  # 画像/ポイント/プレーンのペイロード構築だけ使う
 
 # ===== スケール設定 =====
-SD_BASE = 4.0               # sd_ratio -> px 変換の基礎
-POLY_WIDTH_SCALE = 2.0      # ポリゴン横幅を2倍
+SD_BASE = 4.0                 # sd_ratio -> px 変換の基礎
+POLY_WIDTH_SCALE = 2.0        # ポリゴン横幅を2倍
 ANGLE_STACK_BASE_WIDTH = 900  # 角度カラムのスケール基準となる画像幅(px)
 
 # ===== 角度定義 =====
@@ -68,7 +69,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       /* 画像のアスペクト比は height:auto で厳守 */
       #ceph-image{width:100%;height:auto;display:block;pointer-events:none;user-select:none;-webkit-user-select:none;}
 
-      #panzoom{position:relative;transform-origin:0 0;}
       #ceph-planes{position:absolute;inset:0;pointer-events:none;z-index:1;}
       #ceph-overlay{position:absolute;inset:0;pointer-events:none;z-index:2;}
       #ceph-stage{position:absolute;inset:0;pointer-events:auto;z-index:3;touch-action:none;}
@@ -97,7 +97,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       .ceph-marker{position:absolute;transform:translate(-50%,0);cursor:grab;}
       .ceph-marker.dragging{cursor:grabbing;}
       .ceph-marker .pin{width:0;height:0;margin:0 auto;}
-      .ceph-label{margin-top:2px;font-size:11px;font-weight:700;color:#f8fafc;text-shadow:0 1px 2px rgba(0,0,0,.6);}
+      .ceph-label{margin-top:2px;font-size:11px;font-weight:700;color:#f8fafc;text-shadow:0 1px 2px rgba(0,0,0,.6);text-align:center;}
 
       /* 座標ラベル */
       .coord-tag{position:absolute;transform:translate(6px,-16px);background:rgba(15,23,42,.78);
@@ -105,12 +105,10 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
     </style>
 
     <div class="ceph-wrapper">
-      <div id="panzoom">
-        <img id="ceph-image" src="__IMAGE_DATA_URL__" alt="cephalometric background"/>
-        <svg id="ceph-planes"></svg>
-        <svg id="ceph-overlay"></svg>
-        <div id="ceph-stage"></div>
-      </div>
+      <img id="ceph-image" src="__IMAGE_DATA_URL__" alt="cephalometric background"/>
+      <svg id="ceph-planes"></svg>
+      <svg id="ceph-overlay"></svg>
+      <div id="ceph-stage"></div>
       <div id="angle-stack">__ANGLE_ROWS_HTML__</div>
     </div>
 
@@ -123,17 +121,16 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       const payload = __PAYLOAD_JSON__;
 
       (function(){
-        const wrapper   = document.querySelector(".ceph-wrapper");
-        const panzoom   = document.getElementById("panzoom");
-        const image     = document.getElementById("ceph-image");
-        const stage     = document.getElementById("ceph-stage");
+        const wrapper = document.querySelector(".ceph-wrapper");
+        const image   = document.getElementById("ceph-image");
+        const stage   = document.getElementById("ceph-stage");
         const planesSvg = document.getElementById("ceph-planes");
         const overlaySvg= document.getElementById("ceph-overlay");
         const angleStack= document.getElementById("angle-stack");
 
         // 角度カラム参照
         const angleRows = Array.from(document.querySelectorAll("#angle-stack .angle-row"));
-        const angleRowMap = Object.fromEntries(angleRows.map(r => [r.dataset.angle, {row:r, valueEl:r.querySelector(".angle-value")}]));
+        const angleRowMap = Object.fromEntries(angleRows.map(r => [r.dataset.angle, {row:r, valueEl:r.querySelector(".angle-value")}]))
 
         // マーカー＆プレーン
         const markers=[], markerById={}, planeDefs=(payload.planes||[]), planeLines=[];
@@ -143,7 +140,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         const clamp=(v,lo,hi)=>Math.min(Math.max(v,lo),hi);
         const xy = m => (!m?null:{x:parseFloat(m.dataset.left||"0"), y:parseFloat(m.dataset.top||"0")});
 
-        // ===== 角度カラム scale を画像幅に同期 =====
+        // ========== 角度カラム scale を画像幅に同期 ==========
         function syncAngleStackScale(){
           const base = ANGLE_STACK_BASE_WIDTH || 900;
           const w = image.clientWidth || base;
@@ -151,7 +148,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           angleStack.style.transform = `scale(${scale})`;
         }
 
-        // ===== 角度計算 =====
+        // ========== 角度計算 ==========
         const computeAngle=(pairA,pairB)=>{
           const a1=markerById[pairA[0]], a2=markerById[pairA[1]], b1=markerById[pairB[0]], b2=markerById[pairB[1]];
           if(!a1||!a2||!b1||!b2) return null;
@@ -184,21 +181,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
-        // ====== Pan & Zoom 状態 ======
-        const pz = { scale: 1, tx: 0, ty: 0 };
-        function applyPZ(){
-          panzoom.style.transform = `translate(${pz.tx}px, ${pz.ty}px) scale(${pz.scale})`;
-        }
-        // 画面座標 -> ステージ座標（逆変換）
-        function toStageXY(clientX, clientY){
-          const rect = panzoom.getBoundingClientRect();
-          const x = (clientX - rect.left - pz.tx) / pz.scale;
-          const y = (clientY - rect.top  - pz.ty) / pz.scale;
-          return {x, y};
-        }
-        function pointerToStage(ev){ return toStageXY(ev.clientX, ev.clientY); }
-
-        // ====== マーカー ======
+        // ========== マーカー ==========
         function setPosition(m,left,top){
           const w=stage.clientWidth||1,h=stage.clientHeight||1;
           const cl=clamp(left,0,w), ct=clamp(top,0,h);
@@ -216,11 +199,18 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         function createMarker(pt){
           const m=document.createElement("div"); m.className="ceph-marker"; m.dataset.id=pt.id;
           const s=pt.size||28;
+
           const pin=document.createElement("div"); pin.className="pin";
           pin.style.borderLeft=(s/2)+"px solid transparent";
           pin.style.borderRight=(s/2)+"px solid transparent";
           pin.style.borderBottom=s+"px solid "+(pt.color||"#f97316");
           m.appendChild(pin);
+
+          // ★ ラベル（略号）を追加
+          const lbl = document.createElement("div");
+          lbl.className = "ceph-label";
+          lbl.textContent = pt.id;        // 例: N, S, A, Pog ...
+          m.appendChild(lbl);
 
           if (typeof pt.x_px==="number" && typeof pt.y_px==="number"){
             m.dataset.initPlaced="1"; m.dataset.left=pt.x_px; m.dataset.top=pt.y_px;
@@ -234,19 +224,17 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
 
           stage.appendChild(m); markerById[pt.id]=m; markers.push(m);
 
+          // ドラッグ（PC/モバイル共通：Pointer Events）
           m.addEventListener("pointerdown",(ev)=>{
-            // マーカー掴み時は pan/zoom にイベントを渡さない
-            ev.stopPropagation();
-            const p = pointerToStage(ev);
+            const rect=stage.getBoundingClientRect();
             const left=parseFloat(m.dataset.left||"0"), top=parseFloat(m.dataset.top||"0");
-            dragOffset={x:p.x-left, y:p.y-top};
+            dragOffset={x:ev.clientX-(rect.left+left), y:ev.clientY-(rect.top+top)};
             activeMarker=m; m.classList.add("dragging"); ev.preventDefault();
           });
           m.addEventListener("pointermove",(ev)=>{
             if(activeMarker!==m) return;
-            ev.stopPropagation();
-            const p = pointerToStage(ev);
-            setPosition(m, p.x - dragOffset.x, p.y - dragOffset.y);
+            const rect=stage.getBoundingClientRect();
+            setPosition(m, ev.clientX-rect.left-dragOffset.x, ev.clientY-rect.top-dragOffset.y);
             updatePlanes(); updateAngleStack(); redrawPolygonAndDots();
           });
           const finish=()=>{
@@ -272,7 +260,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
-        // ====== プレーン ======
+        // ========== プレーン ==========
         function initPlanes(){
           planesSvg.innerHTML=""; planeLines.length=0;
           planeDefs.forEach(pl=>{
@@ -297,7 +285,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
-        // ====== 角度カラム行の中心Y（scale後の実表示で取得） ======
+        // ========== 角度カラム行の中心Yを取得（scale後の実表示に基づく） ==========
         function measureRowCentersMap(){
           const wrapRect = wrapper.getBoundingClientRect();
           const map = new Map();
@@ -309,7 +297,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           return map;
         }
 
-        // ====== ポリゴン＆赤丸 ======
+        // ========== ポリゴン＆赤丸 ==========
         function redrawPolygonAndDots(){
           if(!overlaySvg) return;
           const w=image.clientWidth||800, h=image.clientHeight||600;
@@ -394,9 +382,20 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           POLYGON_ROWS.forEach((row,i)=>{
             const label=row[0]; if(label==="00"||label==="01"||label==="ZZ") return;
             const id="dot-"+label.replace(/[^a-zA-Z0-9_-]/g,"-");
+            const dot=document.createElementNS("http://www.w3.org/200/svg","circle");
+            // ↑ タイポ防止：正しくは "http://www.w3.org/2000/svg"
+          });
+
+          // 正しい生成（上の安全ガードのため改めて作成）
+          const dots2=document.createElementNS("http://www.w3.org/2000/svg","g"); dots2.setAttribute("id","std-value-dots"); g.appendChild(dots2);
+          POLYGON_ROWS.forEach((row,i)=>{
+            const label=row[0]; if(label==="00"||label==="01"||label==="ZZ") return;
             const dot=document.createElementNS("http://www.w3.org/2000/svg","circle");
-            dot.setAttribute("id", id); dot.setAttribute("class","angle-dot"); dot.setAttribute("r","5");
-            dot.setAttribute("cy", String(ys[i])); dots.appendChild(dot);
+            dot.setAttribute("id","dot-"+label.replace(/[^a-zA-Z0-9_-]/g,"-"));
+            dot.setAttribute("class","angle-dot");
+            dot.setAttribute("r","5");
+            dot.setAttribute("cy", String(ys[i]));
+            dots2.appendChild(dot);
           });
 
           positionDots(unit, offsetX);
@@ -421,77 +420,12 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
-        // ====== ピンチ（2指）とパン（1指） ======
-        let pointers = new Map();
-        function onPointerDownCanvas(e){
-          panzoom.setPointerCapture(e.pointerId);
-          pointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
-        }
-        function onPointerMoveCanvas(e){
-          if(!pointers.has(e.pointerId)) return;
-          pointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
-          const pts = Array.from(pointers.values());
-
-          if(pts.length === 2){
-            // ピンチ：距離と中心
-            const cx = (pts[0].x + pts[1].x) / 2;
-            const cy = (pts[0].y + pts[1].y) / 2;
-            const d  = Math.hypot(pts[0].x-pts[1].x, pts[0].y-pts[1].y);
-
-            if(onPointerMoveCanvas._lastD == null){
-              onPointerMoveCanvas._lastD = d;
-              onPointerMoveCanvas._cx = cx; onPointerMoveCanvas._cy = cy;
-              return;
-            }
-            const rect = panzoom.getBoundingClientRect();
-            const world = toStageXY(cx, cy); // 旧スケールでの世界座標
-            let s = pz.scale * (d / onPointerMoveCanvas._lastD);
-            s = Math.max(1, Math.min(4, s)); // 1〜4倍に制限
-
-            // 不動点（画面のピンチ中心）を維持するように tx,ty を再計算
-            pz.scale = s;
-            pz.tx = (cx - rect.left) - world.x * s;
-            pz.ty = (cy - rect.top ) - world.y * s;
-
-            onPointerMoveCanvas._lastD = d;
-            applyPZ();
-          } else if(pts.length === 1 && pz.scale > 1 && !activeMarker){
-            // パン（ズーム時のみ）
-            const cur = pts[0];
-            const prev = onPointerMoveCanvas._prev || cur;
-            pz.tx += (cur.x - prev.x);
-            pz.ty += (cur.y - prev.y);
-            onPointerMoveCanvas._prev = cur;
-            applyPZ();
-          }
-        }
-        function onPointerUpCanvas(e){
-          pointers.delete(e.pointerId);
-          if(pointers.size < 2){
-            onPointerMoveCanvas._lastD = null;
-            onPointerMoveCanvas._prev = null;
-          }
-        }
-        // ダブルタップでリセット
-        let lastTap=0;
-        panzoom.addEventListener("pointerdown", e=>{
-          const now = Date.now();
-          if(now - lastTap < 300){ pz.scale=1; pz.tx=0; pz.ty=0; applyPZ(); }
-          lastTap = now;
-        });
-        // 背景でピンチ/パン
-        panzoom.addEventListener("pointerdown", onPointerDownCanvas);
-        panzoom.addEventListener("pointermove", onPointerMoveCanvas);
-        panzoom.addEventListener("pointerup",   onPointerUpCanvas);
-        panzoom.addEventListener("pointercancel", onPointerUpCanvas);
-
-        // ====== レイアウト ======
+        // ========== レイアウト ==========
         function updateLayout(){
           const w=image.clientWidth||0, h=image.clientHeight||0;
           stage.style.width=w+"px"; stage.style.height=h+"px";
-          syncAngleStackScale();
+          syncAngleStackScale();                 // 画像幅に合わせて角度カラムをscale
           placeInitMarkersOnce(); initPlanes(); updatePlanes(); updateAngleStack(); redrawPolygonAndDots();
-          applyPZ(); // 初期適用（1倍）
         }
 
         window.addEventListener("pointerup", ()=>{
@@ -524,6 +458,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
     return components.html(html, height=1100, scrolling=False)
 
 def main():
+    # CEF03 の UI は使わず、描画コンポーネントだけ差し替える
     base.render_ceph_component = render_ceph_component
     base.main()
 
