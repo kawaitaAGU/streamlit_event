@@ -1,4 +1,4 @@
-# CEF27.py — single-canvas, pinch-to-zoom & pan (scene-wide), conflict-free with marker drag
+# CEF28.py — angle/coord columns start at 0.5x size; scene pinch-zoom & pan preserved
 
 import json
 import streamlit as st
@@ -6,9 +6,10 @@ import streamlit.components.v1 as components
 import CEF03 as base  # 画像/ポイント/プレーンのヘルパーのみ使用
 
 # ===== スケール設定 =====
-SD_BASE = 4.0                 # sd_ratio -> px 変換の基礎
-POLY_WIDTH_SCALE = 2.0        # ポリゴン横幅を2倍
-ANGLE_STACK_BASE_WIDTH = 900  # 角度カラムの基準幅（初期スケーリング用）
+SD_BASE = 4.0                  # sd_ratio -> px 変換の基礎
+POLY_WIDTH_SCALE = 2.0         # ポリゴン横幅を2倍
+ANGLE_STACK_BASE_WIDTH = 900   # 角度カラムの基準幅（初期スケーリング用）
+ANGLE_STACK_INIT_SCALE = 0.5   # ← 角度カラム＋座標カラムの初期スケール（高さ/幅ともに半分）
 
 # ===== 角度定義 =====
 ANGLE_STACK_CONFIG = [
@@ -66,7 +67,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
     html = """
     <style>
       .root-wrap{position:relative;width:min(100%,960px);margin:0 auto;touch-action:none;}
-      /* === scene 全体（画像/プレーン/オーバーレイ/マーカー/角度カラム）をまとめて変形 === */
       #scene{position:relative;transform-origin:0 0;will-change:transform;}
 
       /* 画像のアスペクト比は height:auto で厳守 */
@@ -76,7 +76,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       #ceph-overlay{position:absolute;inset:0;pointer-events:none;z-index:2;}
       #ceph-stage{position:absolute;inset:0;pointer-events:auto;z-index:3;touch-action:none;}
 
-      /* 角度カラム */
+      /* 角度カラム（初期は0.5倍に） */
       #angle-stack{
         position:absolute;top:56px;left:12px;
         display:flex;flex-direction:column;gap:10px;
@@ -84,6 +84,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         background:rgba(15,23,42,.78);color:#f8fafc;
         font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
         pointer-events:none;z-index:4;min-width:140px;
+        transform-origin:top left; /* JSで scale を当てる */
       }
       .angle-row{display:flex;justify-content:space-between;align-items:center;padding:2px 0;}
       .angle-row.dimmed{opacity:.45;}
@@ -127,6 +128,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       const SD_BASE = __SD_BASE__;
       const POLY_WIDTH_SCALE = __POLY_WIDTH_SCALE__;
       const ANGLE_STACK_BASE_WIDTH = __ANGLE_STACK_BASE_WIDTH__;
+      const ANGLE_STACK_INIT_SCALE = __ANGLE_STACK_INIT_SCALE__;
       const payload = __PAYLOAD_JSON__;
 
       (function(){
@@ -148,12 +150,15 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         let activeMarker=null, dragOffset={x:0,y:0};
         const angleCurrent=new Map();
 
+        // === 初期：角度カラムを 0.5 倍に縮小 ===
+        angleStack.style.transform = `scale(${ANGLE_STACK_INIT_SCALE})`;
+
         // ======== シーンのパン＆ズーム（ピンチ/ドラッグ/ホイール） ========
         let sScale = 1.0;
         let sMin = 0.7, sMax = 3.5;
-        let sTx = 0, sTy = 0;           // translate(px)
-        const activePtrs = new Map();   // pointerId -> {x,y}
-        let pinchStart = null;          // {d, cx, cy, sScale0, sTx0, sTy0}
+        let sTx = 0, sTy = 0;
+        const activePtrs = new Map();
+        let pinchStart = null;
         let isPanningScene = false;
 
         const clamp=(v,lo,hi)=>Math.min(Math.max(v,lo),hi);
@@ -163,7 +168,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         }
 
         function getScenePoint(clientX, clientY){
-          // 画面座標 -> scene ローカル座標
           const rect = root.getBoundingClientRect();
           const x = (clientX - rect.left - sTx) / sScale;
           const y = (clientY - rect.top  - sTy) / sScale;
@@ -171,16 +175,12 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         }
 
         function onRootPointerDown(ev){
-          // マーカー自体の drag 開始は各マーカーの listener で処理
-          // ここでは：空地の1本指 → パン開始、2本指 → ピンチ開始
           if (ev.target.closest(".ceph-marker")) return;
-
           root.setPointerCapture(ev.pointerId);
           activePtrs.set(ev.pointerId, {x: ev.clientX, y: ev.clientY});
           if (activePtrs.size === 1){
             isPanningScene = true;
           } else if (activePtrs.size === 2){
-            // ピンチ初期化
             const pts = Array.from(activePtrs.values());
             const dx = pts[1].x - pts[0].x, dy = pts[1].y - pts[0].y;
             const d = Math.hypot(dx, dy);
@@ -196,12 +196,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           activePtrs.set(ev.pointerId, {x: ev.clientX, y: ev.clientY});
 
           if (activePtrs.size === 1 && isPanningScene && !activeMarker){
-            // 1本指パン
-            const prev = activePtrs.get(ev.pointerId);
-            // 実際の差分は event 単体では取れないので、直前値を保持する方式に変更
-          }
-          if (activePtrs.size === 1 && isPanningScene && !activeMarker){
-            // 差分パン（直前位置を保存しながら）
             const ids = Array.from(activePtrs.keys());
             const id = ids[0];
             const cur = activePtrs.get(id);
@@ -222,10 +216,8 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             const d2 = Math.hypot(dx, dy);
             if (d2 < 5) return;
 
-            // 新スケール
             let nextScale = clamp(pinchStart.sScale0 * (d2 / pinchStart.d), sMin, sMax);
 
-            // ピンチ中心（画面座標）を基準に、内容がその場に留まるよう translate を調整
             const rect = root.getBoundingClientRect();
             const cx = (pts[0].x + pts[1].x)/2, cy = (pts[0].y + pts[1].y)/2;
             const sx0 = (cx - rect.left - pinchStart.sTx0) / pinchStart.sScale0;
@@ -256,11 +248,11 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         root.addEventListener("pointercancel", onRootPointerUp, {passive:false});
         root.addEventListener("lostpointercapture", onRootPointerUp, {passive:false});
 
-        // マウスホイールでのズーム（Ctrl+ホイールで倍率、通常ホイールはパンに任せる）
+        // Ctrl+ホイールでズーム
         root.addEventListener("wheel", (ev)=>{
           if (!ev.ctrlKey) return;
           ev.preventDefault();
-          const delta = -ev.deltaY; // 上で拡大
+          const delta = -ev.deltaY;
           const factor = Math.exp(delta * 0.0015);
           const rect = root.getBoundingClientRect();
           const cx = ev.clientX, cy = ev.clientY;
@@ -273,7 +265,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           applySceneTransform();
         }, {passive:false});
 
-        // ======== 角度計算まわり（現状ロジックを維持） ========
+        // ======== 角度計算 ========
         const xy = m => (!m?null:{x:parseFloat(m.dataset.left||"0"), y:parseFloat(m.dataset.top||"0")});
 
         const computeAngle=(pairA,pairB)=>{
@@ -303,9 +295,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             }else{
               entry.row.classList.remove("dimmed"); entry.valueEl.textContent=v.toFixed(1)+"°"; angleCurrent.set(cfg.id,v);
             }
-            cache.set(cfg.id,v);
           });
-          // 座標リストも更新
           renderCoordStack();
         }
 
@@ -342,14 +332,10 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
 
           stage.appendChild(m); markerById[pt.id]=m; markers.push(m);
 
-          // === マーカー専用ドラッグ（scene パン/ズームと排他） ===
           m.addEventListener("pointerdown",(ev)=>{
-            // ピンチ中やシーンパン中はドラッグ開始しない
-            if (activePtrs.size >= 2) return;
-            // ここからマーカーの pointer は stage ローカル座標で解釈
+            if (activePtrs.size >= 2) return; // ピンチ中は開始しない
             const rect = root.getBoundingClientRect();
             const left=parseFloat(m.dataset.left||"0"), top=parseFloat(m.dataset.top||"0");
-            // scene 変換を考慮してドラッグオフセットを scene ローカルで求める
             const p = getScenePoint(ev.clientX, ev.clientY);
             dragOffset = { x: p.x - left, y: p.y - top };
             activeMarker=m; m.classList.add("dragging");
@@ -412,22 +398,21 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
-        // ======== 角度カラムの行中心Yを scene ローカル座標に変換して取得 ========
+        // ======== 角度カラム行の中心Y（sceneローカル） ========
         function measureRowCentersMap(){
           const rootRect = root.getBoundingClientRect();
           const map = new Map();
           ANGLE_CONFIG.forEach(cfg=>{
             const entry=angleRowMap[cfg.id]; if(!entry) return;
             const r = entry.row.getBoundingClientRect();
-            // 画面px -> scene ローカルへ逆変換
             const cy_screen = (r.top + r.height/2);
-            const cy = (cy_screen - rootRect.top - sTy) / sScale;
+            const cy = (cy_screen - rootRect.top - sTy) / sScale; // scene座標に逆変換
             map.set(cfg.id, cy);
           });
           return map;
         }
 
-        // ======== ポリゴン＆赤丸（scene ローカル座標で描く） ========
+        // ======== ポリゴン＆赤丸 ========
         function redrawPolygonAndDots(){
           if(!overlaySvg) return;
           const w=image.clientWidth||800, h=image.clientHeight||600;
@@ -539,8 +524,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         // ======== 座標リスト（角度の下） ========
         function renderCoordStack(){
           if (!coordStack) return;
-          const ids = Object.keys(markerById);
-          ids.sort();
+          const ids = Object.keys(markerById).sort();
           coordStack.innerHTML = ids.map(id=>{
             const m = markerById[id];
             const x = m ? Math.round(parseFloat(m.dataset.left||"0")) : 0;
@@ -563,12 +547,15 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
 
         window.addEventListener("resize", updateLayout);
 
-        // 初期 transform（角度カラムの基準幅に寄せる軽い合わせ）
-        // ※ 以後はピンチ/ホイール操作で自由に
+        // 初期 transform（必要なら少し縮小）
         const base = ANGLE_STACK_BASE_WIDTH || 900;
         const iw = image.clientWidth || base;
         if (iw < base){
-          sScale = Math.max(0.8, iw / base);
+          let sScale0 = Math.max(0.8, iw / base);
+          // 角度カラム側はすでに 0.5x 済みなので、scene 初期スケールはそのまま
+          // シーンの倍率だけ反映
+          (function(){ sScale = sScale0; })();
+          // translate は 0 のまま。必要に応じて中央寄せしたければここで sTx/sTy を調整
           applySceneTransform();
         }
       })();
@@ -582,6 +569,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
     html = html.replace("__SD_BASE__", json.dumps(SD_BASE))
     html = html.replace("__POLY_WIDTH_SCALE__", json.dumps(POLY_WIDTH_SCALE))
     html = html.replace("__ANGLE_STACK_BASE_WIDTH__", json.dumps(ANGLE_STACK_BASE_WIDTH))
+    html = html.replace("__ANGLE_STACK_INIT_SCALE__", json.dumps(ANGLE_STACK_INIT_SCALE))
     html = html.replace("__PAYLOAD_JSON__", payload_json)
 
     return components.html(html, height=1100, scrolling=False)
