@@ -1,4 +1,4 @@
-# CEF28.py — angle/coord columns start at 0.5x size; scene pinch-zoom & pan preserved
+# CEF29.py — triangle base width = 50% (other behavior unchanged from CEF28)
 
 import json
 import streamlit as st
@@ -9,7 +9,10 @@ import CEF03 as base  # 画像/ポイント/プレーンのヘルパーのみ使
 SD_BASE = 4.0                  # sd_ratio -> px 変換の基礎
 POLY_WIDTH_SCALE = 2.0         # ポリゴン横幅を2倍
 ANGLE_STACK_BASE_WIDTH = 900   # 角度カラムの基準幅（初期スケーリング用）
-ANGLE_STACK_INIT_SCALE = 0.5   # ← 角度カラム＋座標カラムの初期スケール（高さ/幅ともに半分）
+ANGLE_STACK_INIT_SCALE = 0.5   # 角度カラム＋座標カラムの初期スケール（高さ/幅ともに半分）
+
+# ★ 三角の底辺スケール（0.5 = 既定の半分）
+TRI_BASE_FACTOR = 0.5
 
 # ===== 角度定義 =====
 ANGLE_STACK_CONFIG = [
@@ -69,14 +72,12 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       .root-wrap{position:relative;width:min(100%,960px);margin:0 auto;touch-action:none;}
       #scene{position:relative;transform-origin:0 0;will-change:transform;}
 
-      /* 画像のアスペクト比は height:auto で厳守 */
       #ceph-image{width:100%;height:auto;display:block;pointer-events:none;user-select:none;-webkit-user-select:none;}
 
       #ceph-planes{position:absolute;inset:0;pointer-events:none;z-index:1;}
       #ceph-overlay{position:absolute;inset:0;pointer-events:none;z-index:2;}
       #ceph-stage{position:absolute;inset:0;pointer-events:auto;z-index:3;touch-action:none;}
 
-      /* 角度カラム（初期は0.5倍に） */
       #angle-stack{
         position:absolute;top:56px;left:12px;
         display:flex;flex-direction:column;gap:10px;
@@ -84,25 +85,22 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         background:rgba(15,23,42,.78);color:#f8fafc;
         font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
         pointer-events:none;z-index:4;min-width:140px;
-        transform-origin:top left; /* JSで scale を当てる */
+        transform-origin:top left;
       }
       .angle-row{display:flex;justify-content:space-between;align-items:center;padding:2px 0;}
       .angle-row.dimmed{opacity:.45;}
       .angle-name,.angle-value{font-size:13px;font-weight:600;}
 
-      /* 座標一覧（角度カラムの下にリスト表示） */
       #coord-stack{margin-top:10px;padding-top:8px;border-top:1px solid rgba(248,250,252,.2);font:11px/1.3 ui-monospace,Menlo,Consolas,monospace;}
       #coord-stack .coord-line{display:flex;justify-content:space-between;gap:12px;opacity:.95;}
       #coord-stack .coord-line .pt{width:42px;font-weight:700;}
       #coord-stack .coord-line .xy{flex:1;text-align:right;}
 
-      /* ポリゴン線類＆ドット */
       #std-poly-outline{fill:none;stroke:#1e40af;stroke-width:1.25;stroke-opacity:.9;}
       .std-centerline{stroke:#facc15;stroke-width:2;}
       .std-hline{stroke:#ffffff;stroke-width:1.25;}
       .angle-dot{fill:#ef4444;stroke:#ffffff;stroke-width:1.5;}
 
-      /* 三角マーカー（略号ラベル付き） */
       .ceph-marker{position:absolute;transform:translate(-50%,0);cursor:grab;}
       .ceph-marker.dragging{cursor:grabbing;}
       .ceph-marker .pin{width:0;height:0;margin:0 auto;}
@@ -129,6 +127,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       const POLY_WIDTH_SCALE = __POLY_WIDTH_SCALE__;
       const ANGLE_STACK_BASE_WIDTH = __ANGLE_STACK_BASE_WIDTH__;
       const ANGLE_STACK_INIT_SCALE = __ANGLE_STACK_INIT_SCALE__;
+      const TRI_BASE_FACTOR = __TRI_BASE_FACTOR__;
       const payload = __PAYLOAD_JSON__;
 
       (function(){
@@ -141,19 +140,16 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         const angleStack= document.getElementById("angle-stack");
         const coordStack= document.getElementById("coord-stack");
 
-        // 角度カラム参照
         const angleRows = Array.from(document.querySelectorAll("#angle-stack .angle-row"));
         const angleRowMap = Object.fromEntries(angleRows.map(r => [r.dataset.angle, {row:r, valueEl:r.querySelector(".angle-value")}]))
 
-        // マーカー＆プレーン
         const markers=[], markerById={}, planeDefs=(payload.planes||[]), planeLines=[];
         let activeMarker=null, dragOffset={x:0,y:0};
         const angleCurrent=new Map();
 
-        // === 初期：角度カラムを 0.5 倍に縮小 ===
         angleStack.style.transform = `scale(${ANGLE_STACK_INIT_SCALE})`;
 
-        // ======== シーンのパン＆ズーム（ピンチ/ドラッグ/ホイール） ========
+        // ======== シーンのパン＆ズーム ========
         let sScale = 1.0;
         let sMin = 0.7, sMax = 3.5;
         let sTx = 0, sTy = 0;
@@ -216,7 +212,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             const d2 = Math.hypot(dx, dy);
             if (d2 < 5) return;
 
-            let nextScale = clamp(pinchStart.sScale0 * (d2 / pinchStart.d), sMin, sMax);
+            let nextScale = clamp(pinchStart.sScale0 * (d2 / pinchStart.d),  sMin, sMax);
 
             const rect = root.getBoundingClientRect();
             const cx = (pts[0].x + pts[1].x)/2, cy = (pts[0].y + pts[1].y)/2;
@@ -248,7 +244,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         root.addEventListener("pointercancel", onRootPointerUp, {passive:false});
         root.addEventListener("lostpointercapture", onRootPointerUp, {passive:false});
 
-        // Ctrl+ホイールでズーム
         root.addEventListener("wheel", (ev)=>{
           if (!ev.ctrlKey) return;
           ev.preventDefault();
@@ -258,7 +253,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           const cx = ev.clientX, cy = ev.clientY;
           const sx0 = (cx - rect.left - sTx) / sScale;
           const sy0 = (cy - rect.top  - sTy) / sScale;
-          const next = clamp(sScale * factor, sMin, sMax);
+          const next = Math.min(Math.max(sScale * factor, 0.7), 3.5);
           sTx = cx - rect.left - sx0 * next;
           sTy = cy - rect.top  - sy0 * next;
           sScale = next;
@@ -309,10 +304,13 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         function createMarker(pt){
           const m=document.createElement("div"); m.className="ceph-marker"; m.dataset.id=pt.id;
           const s=pt.size||28;
+
+          // ★ ここを変更：三角の底辺を半分にする
           const pin=document.createElement("div"); pin.className="pin";
-          pin.style.borderLeft=(s/2)+"px solid transparent";
-          pin.style.borderRight=(s/2)+"px solid transparent";
-          pin.style.borderBottom=s+"px solid "+(pt.color||"#f97316");
+          const baseHalf = (s/2) * TRI_BASE_FACTOR;  // 既定は s/2。0.5倍にする
+          pin.style.borderLeft  = baseHalf + "px solid transparent";
+          pin.style.borderRight = baseHalf + "px solid transparent";
+          pin.style.borderBottom= s + "px solid " + (pt.color||"#f97316");
           m.appendChild(pin);
 
           const lbl = document.createElement("div");
@@ -333,7 +331,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           stage.appendChild(m); markerById[pt.id]=m; markers.push(m);
 
           m.addEventListener("pointerdown",(ev)=>{
-            if (activePtrs.size >= 2) return; // ピンチ中は開始しない
+            if (activePtrs.size >= 2) return;
             const rect = root.getBoundingClientRect();
             const left=parseFloat(m.dataset.left||"0"), top=parseFloat(m.dataset.top||"0");
             const p = getScenePoint(ev.clientX, ev.clientY);
@@ -398,7 +396,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
-        // ======== 角度カラム行の中心Y（sceneローカル） ========
         function measureRowCentersMap(){
           const rootRect = root.getBoundingClientRect();
           const map = new Map();
@@ -406,13 +403,12 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             const entry=angleRowMap[cfg.id]; if(!entry) return;
             const r = entry.row.getBoundingClientRect();
             const cy_screen = (r.top + r.height/2);
-            const cy = (cy_screen - rootRect.top - sTy) / sScale; // scene座標に逆変換
+            const cy = (cy_screen - rootRect.top - sTy) / sScale; // scene座標
             map.set(cfg.id, cy);
           });
           return map;
         }
 
-        // ======== ポリゴン＆赤丸 ========
         function redrawPolygonAndDots(){
           if(!overlaySvg) return;
           const w=image.clientWidth||800, h=image.clientHeight||600;
@@ -521,7 +517,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
-        // ======== 座標リスト（角度の下） ========
         function renderCoordStack(){
           if (!coordStack) return;
           const ids = Object.keys(markerById).sort();
@@ -533,7 +528,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           }).join("");
         }
 
-        // ======== レイアウト初期化 ========
         function updateLayout(){
           const w=image.clientWidth||0, h=image.clientHeight||0;
           stage.style.width=w+"px"; stage.style.height=h+"px";
@@ -547,15 +541,12 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
 
         window.addEventListener("resize", updateLayout);
 
-        // 初期 transform（必要なら少し縮小）
+        // 初期表示で小さめにする場合（画像幅が基準より狭いとき）
         const base = ANGLE_STACK_BASE_WIDTH || 900;
         const iw = image.clientWidth || base;
         if (iw < base){
           let sScale0 = Math.max(0.8, iw / base);
-          // 角度カラム側はすでに 0.5x 済みなので、scene 初期スケールはそのまま
-          // シーンの倍率だけ反映
           (function(){ sScale = sScale0; })();
-          // translate は 0 のまま。必要に応じて中央寄せしたければここで sTx/sTy を調整
           applySceneTransform();
         }
       })();
@@ -570,6 +561,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
     html = html.replace("__POLY_WIDTH_SCALE__", json.dumps(POLY_WIDTH_SCALE))
     html = html.replace("__ANGLE_STACK_BASE_WIDTH__", json.dumps(ANGLE_STACK_BASE_WIDTH))
     html = html.replace("__ANGLE_STACK_INIT_SCALE__", json.dumps(ANGLE_STACK_INIT_SCALE))
+    html = html.replace("__TRI_BASE_FACTOR__", json.dumps(TRI_BASE_FACTOR))
     html = html.replace("__PAYLOAD_JSON__", payload_json)
 
     return components.html(html, height=1100, scrolling=False)
