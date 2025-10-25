@@ -936,8 +936,8 @@ def build_polygon_figure(angles: Dict[str, float]) -> Optional[go.Figure]:
 def main() -> None:
     ensure_session_state()
 
-    st.title("🦷 ZZZ.gif Cephalometric Analyzer (Streamlit 移植版)")
-    st.caption("Tkinter 版 `ce_simple51.py` を Streamlit + コンポーネントで再構築したアプリです。")
+    st.title("🦷Cephalometric Analyzer (Streamlit)")
+    st.caption("Streamlit ")
 
     with st.sidebar:
         st.header("表示設定")
@@ -952,7 +952,7 @@ def main() -> None:
 
     st.markdown("### 画像の選択")
     uploaded = st.file_uploader(
-        "分析したいレントゲン画像をアップロードしてください（未選択時は付属の `zzz.gif` を使用）。",
+        "分析したいレントゲン画像をアップロードしてください。",
         type=["png", "jpg", "jpeg", "gif", "webp"],
     )
 
@@ -965,9 +965,9 @@ def main() -> None:
     else:
         image_data_url = st.session_state.default_image_data_url
         if image_data_url:
-            st.info("画像が未選択のため、同梱の `zzz.gif` を表示しています。")
+            st.info("画像が未選択です。")
         else:
-            st.error("表示できる画像が見つかりません。`zzz.gif` を同じフォルダに配置してください。")
+            st.error("表示できる画像がまだです。")
             return
 
     component_value = render_ceph_component(
