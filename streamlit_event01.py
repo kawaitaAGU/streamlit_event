@@ -1,14 +1,14 @@
-# CEF36_2.py — single-canvas, no sidebar, white polygon + red spine (with top/bottom dummy), marker labels, coords list
+# CEF37.py — apex/bottom connectors to shoulders (Facial & L1_FH), white polygon + red spine, no sidebar
 
 import json
 import streamlit as st
 import streamlit.components.v1 as components
-import CEF03 as base  # 画像/ポイント/プレーンのヘルパーだけ使う（mainは使わない）
+import CEF03 as base  # 画像/ポイント/プレーンのヘルパーだけ利用
 
 # ===== スケール設定 =====
-SD_BASE = 4.0                 # sd_ratio -> px 変換の基礎
-POLY_WIDTH_SCALE = 2.0        # ポリゴン横幅を2倍
-ANGLE_STACK_BASE_WIDTH = 900  # 角度カラムのスケール基準となる画像幅(px)
+SD_BASE = 4.0
+POLY_WIDTH_SCALE = 2.0
+ANGLE_STACK_BASE_WIDTH = 900
 
 # ===== 角度定義 =====
 ANGLE_STACK_CONFIG = [
@@ -27,7 +27,7 @@ ANGLE_STACK_CONFIG = [
     {"id": "L1_FH", "label": "L1 - FH", "type": "angle", "vectors": [["L1", "L1r"], ["Or", "Po"]]},
 ]
 
-# ===== ポリゴン行（"01" はくびれ用ダミー行 / 00, ZZ は境界ダミー） =====
+# ===== ポリゴン行 =====
 POLYGON_ROWS = [
     ["00", 0.0, 0.0, 0.0],
     ["Facial", 83.1, 2.5, 0.1036],
@@ -39,7 +39,7 @@ POLYGON_ROWS = [
     ["SNA", 80.9, 3.1, 0.1250],
     ["SNB", 76.2, 2.8, 0.1286],
     ["SNA-SNB diff", 4.7, 1.8, 0.0714],
-    ["01", 0.0, 0.0, 0.0],  # くびれ中点（ダミー）
+    ["01", 0.0, 0.0, 0.0],  # くびれダミー
     ["Interincisal", 124.3, 6.9, 0.2500],
     ["U1 to FH plane", 109.8, 5.3, 0.1679],
     ["L1 to Mandibular", 93.8, 5.9, 0.2107],
@@ -85,13 +85,16 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       .angle-row.dimmed{opacity:.45;}
       .angle-name,.angle-value{font-size:13px;font-weight:600;}
 
-      /* ポリゴン線類 */
+      /* ポリゴン線 */
       #std-poly-outline{fill:none;stroke:#ffffff;stroke-width:1.5;stroke-opacity:1;}
       .std-centerline{stroke:#facc15;stroke-width:2;}
       .std-hline{stroke:#ffffff;stroke-width:1.0;opacity:.9;}
 
-      /* スパイン（赤い折れ線） */
+      /* スパイン（赤） */
       #std-dot-spine{fill:none;stroke:#ef4444;stroke-width:2.0;}
+
+      /* 追加のコネクタ線（赤） */
+      .apex-connector{stroke:#ffffff;stroke-width:1.5;fill:none;}
 
       /* 三角マーカー */
       .ceph-marker{position:absolute;transform:translate(-50%,0);cursor:grab;}
@@ -178,7 +181,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
               const a=cache.get(cfg.minuend), b=cache.get(cfg.subtrahend);
               if(a!=null && b!=null) v=a-b;
             }
-            if(cfg.id==="Convexity" && v!=null) v=180-v; // 補角
+            if(cfg.id==="Convexity" && v!=null) v=180-v;
             if(v==null || Number.isNaN(v)){
               entry.row.classList.add("dimmed"); entry.valueEl.textContent="--.-°"; angleCurrent.set(cfg.id,null);
             }else{
@@ -260,7 +263,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         // ---- プレーン ----
         function initPlanes(){
           planesSvg.innerHTML=""; planeLines.length=0;
-          planeDefs.forEach(pl=>{
+          (payload.planes||[]).forEach(pl=>{
             const line=document.createElementNS("http://www.w3.org/2000/svg","line");
             line.setAttribute("stroke",pl.color||"#f97316");
             line.setAttribute("stroke-width", String(pl.width||2));
@@ -282,7 +285,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
-        // ---- 角度カラム行の中心Y（scale適用後のDOMから取得）----
+        // ---- 角度カラム中心Y ----
         function measureRowCentersMap(){
           const wrapRect = wrapper.getBoundingClientRect();
           const map = new Map();
@@ -294,7 +297,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           return map;
         }
 
-        // ===== ポリゴン + スパイン（最上/最下に幅ゼロのダミー点を追加） =====
+        // ===== ポリゴン + スパイン + 追加コネクタ =====
         function redrawPolygonAndSpine(){
           if(!overlaySvg) return;
           const w=image.clientWidth||800, h=image.clientHeight||600;
@@ -303,11 +306,10 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
 
           const centersMap = measureRowCentersMap();
 
-          // --- 各行の中心Yを並べる（"01"は中点, "00"/"ZZ"は境界ダミー） ---
+          // 中心Y配列
           const ys = [];
           for(let i=0;i<POLYGON_ROWS.length;i++){
             const label = POLYGON_ROWS[i][0];
-
             if(label==="01"){
               let prevY=null, nextY=null;
               for(let p=i-1;p>=0;p--){
@@ -340,21 +342,21 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             }
           }
 
-          // 縦スケール（行間の中央値）
+          // 縦スケール
           const gaps=[]; for(let i=1;i<ys.length;i++) gaps.push(Math.abs(ys[i]-ys[i-1]));
           const median = gaps.length? gaps.sort((a,b)=>a-b)[Math.floor(gaps.length/2)] : 24;
           const unit = Math.max(14, Math.round(median));
 
-          // 先頭と末尾にダミー点を追加（幅ゼロ）
+          // 最上・最下ダミー
           const topExtraY    = ys[0] - unit;
           const bottomExtraY = ys[ys.length-1] + unit;
           const ysEx = [topExtraY, ...ys, bottomExtraY];
 
+          // 左右幅
           const spread = row => (row[3] * SD_BASE * POLY_WIDTH_SCALE * unit);
           const leftXs  = POLYGON_ROWS.map(row => offsetX - spread(row));
           const rightXs = POLYGON_ROWS.map(row => offsetX + spread(row));
 
-          // 左右Xにもダミー点を追加（中心線上＝幅ゼロ）
           const leftEx  = [offsetX, ...leftXs,  offsetX];
           const rightEx = [offsetX, ...rightXs, offsetX];
 
@@ -363,7 +365,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           const g=document.createElementNS("http://www.w3.org/2000/svg","g");
           overlaySvg.appendChild(g);
 
-          // 外形ポリゴン（白枠）
+          // 外形ポリゴン（白）
           const pts=[];
           for(let i=0;i<ysEx.length;i++) pts.push(leftEx[i]+","+ysEx[i]);
           for(let i=ysEx.length-1;i>=0;i--) pts.push(rightEx[i]+","+ysEx[i]);
@@ -377,7 +379,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           center.setAttribute("y1",ysEx[0]); center.setAttribute("y2",ysEx[ysEx.length-1]);
           center.setAttribute("class","std-centerline"); g.appendChild(center);
 
-          // 行の水平線（ダミーは除外）
+          // 行の水平線（ダミー除外）
           POLYGON_ROWS.forEach((row,i)=>{
             const label=row[0]; if(label==="00"||label==="01"||label==="ZZ") return;
             const hl=document.createElementNS("http://www.w3.org/2000/svg","line");
@@ -386,36 +388,77 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             hl.setAttribute("class","std-hline"); g.appendChild(hl);
           });
 
-          // スパイン（赤丸なし）— L1_FH も確実に含める
+          // スパイン（赤）
           const nodes=[];
-          nodes.push({x:offsetX, y:topExtraY}); // 追加の最上点
+          nodes.push({x:offsetX, y:topExtraY});
           for(let i=0;i<POLYGON_ROWS.length;i++){
             const label=POLYGON_ROWS[i][0];
             if(label==="00"||label==="01"||label==="ZZ") continue;
             const mean=POLYGON_ROWS[i][1], sd=POLYGON_ROWS[i][2];
             const sd_px = POLYGON_ROWS[i][3]*SD_BASE*POLY_WIDTH_SCALE*unit;
-            const v = angleCurrent.get(label); // "L1_FH" もここで拾う
+            const v = angleCurrent.get(label);
             if (v==null || !isFinite(v) || !sd) continue;
             const x = offsetX + ((v-mean)/sd) * sd_px;
             nodes.push({x:x, y:ys[i]});
           }
-          nodes.push({x:offsetX, y:bottomExtraY}); // 追加の最下点
+          nodes.push({x:offsetX, y:bottomExtraY});
           nodes.sort((a,b)=>a.y-b.y);
 
-          let spine = overlaySvg.querySelector("#std-dot-spine");
-          if(!spine){
-            spine = document.createElementNS("http://www.w3.org/2000/svg","polyline");
-            spine.setAttribute("id","std-dot-spine");
-            overlaySvg.appendChild(spine);
-          }
+          let spine = document.createElementNS("http://www.w3.org/2000/svg","polyline");
+          spine.setAttribute("id","std-dot-spine");
           spine.setAttribute("points", nodes.map(n=>n.x + "," + n.y).join(" "));
+          g.appendChild(spine);
+
+          // === 追加：最上点→Facial両肩、最下点→L1_FH両肩 を赤線で結ぶ ===
+          const idxFacial = POLYGON_ROWS.findIndex(r => r[0]==="Facial");
+          const idxL1FH   = POLYGON_ROWS.findIndex(r => r[0]==="L1_FH");
+          if (idxFacial >= 0){
+            // top apex (ysEx[0], offsetX) -> Facial left/right at ys[idxFacial]
+            const yTop = ysEx[0];
+            const yFac = ys[idxFacial];
+            const xLeftFac  = leftXs[idxFacial];
+            const xRightFac = rightXs[idxFacial];
+
+            const l1=document.createElementNS("http://www.w3.org/2000/svg","line");
+            l1.setAttribute("class","apex-connector");
+            l1.setAttribute("x1", String(offsetX)); l1.setAttribute("y1", String(yTop));
+            l1.setAttribute("x2", String(xLeftFac)); l1.setAttribute("y2", String(yFac));
+            g.appendChild(l1);
+
+            const l2=document.createElementNS("http://www.w3.org/2000/svg","line");
+            l2.setAttribute("class","apex-connector");
+            l2.setAttribute("x1", String(offsetX)); l2.setAttribute("y1", String(yTop));
+            l2.setAttribute("x2", String(xRightFac)); l2.setAttribute("y2", String(yFac));
+            g.appendChild(l2);
+          }
+          if (idxL1FH >= 0){
+            // bottom apex (ysEx[last], offsetX) -> L1_FH left/right at ys[idxL1FH]
+            const yBot = ysEx[ysEx.length-1];
+            const yL1  = ys[idxL1FH];
+            const xLeftL1  = leftXs[idxL1FH];
+            const xRightL1 = rightXs[idxL1FH];
+
+            const l3=document.createElementNS("http://www.w3.org/2000/svg","line");
+            l3.setAttribute("class","apex-connector");
+            l3.setAttribute("x1", String(offsetX)); l3.setAttribute("y1", String(yBot));
+            l3.setAttribute("x2", String(xLeftL1)); l3.setAttribute("y2", String(yL1));
+            g.appendChild(l3);
+
+            const l4=document.createElementNS("http://www.w3.org/2000/svg","line");
+            l4.setAttribute("class","apex-connector");
+            l4.setAttribute("x1", String(offsetX)); l4.setAttribute("y1", String(yBot));
+            l4.setAttribute("x2", String(xRightL1)); l4.setAttribute("y2", String(yL1));
+            g.appendChild(l4);
+          }
+          // === 追加ここまで ===
         }
 
-        // ---- 座標まとめ（角度の下に表示） ----
+        // ---- 座標まとめ（角度の下） ----
         function updateCoordsList(){
-          if(!coordsStack) return;
-          coordsStack.innerHTML = "";
-          const order = (payload.points||[]).map(p=>p.id); // 初期点の並びを尊重
+          const list = document.getElementById("coords-stack");
+          if(!list) return;
+          list.innerHTML = "";
+          const order = (payload.points||[]).map(p=>p.id);
           order.forEach(id=>{
             const m = markerById[id];
             if(!m) return;
@@ -426,7 +469,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             const a = document.createElement("div"); a.className="coord-id"; a.textContent = id;
             const b = document.createElement("div"); b.className="coord-xy"; b.textContent = `(${x}, ${y})`;
             row.appendChild(a); row.appendChild(b);
-            coordsStack.appendChild(row);
+            list.appendChild(row);
           });
         }
 
@@ -466,7 +509,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
 
     return components.html(html, height=1100, scrolling=False)
 
-# ── ここがポイント：CEF03.main() は呼ばない。必要最小のUIのみ ──
+# ── 最小UIのみ（CEF03.mainは呼ばない） ──
 def slim_main() -> None:
     base.ensure_session_state()
 
@@ -488,7 +531,6 @@ def slim_main() -> None:
         st.error("表示画像をuploadしてください。")
         return
 
-    # 左カラム（サイドバー）は出さない。固定値を使う
     marker_size = 26
     show_labels = True
 
