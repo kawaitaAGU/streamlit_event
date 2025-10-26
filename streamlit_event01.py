@@ -1,15 +1,16 @@
-# CEF36.py — fixed braces; single-canvas, no sidebar; angle-stack scales; labels;
-#             white polygon outline + vertical polyline; top extra apex point
+# CEF37.py — apex/bottom connectors to shoulders (Facial & L1_FH), white polygon + red spine, no sidebar
 
 import json
 import streamlit as st
 import streamlit.components.v1 as components
-import CEF03 as base
+import CEF03 as base  # 画像/ポイント/プレーンのヘルパーだけ利用
 
+# ===== スケール設定 =====
 SD_BASE = 4.0
 POLY_WIDTH_SCALE = 2.0
 ANGLE_STACK_BASE_WIDTH = 900
 
+# ===== 角度定義 =====
 ANGLE_STACK_CONFIG = [
     {"id": "Facial", "label": "Facial", "type": "angle", "vectors": [["Pog", "N"], ["Po", "Or"]]},
     {"id": "Convexity", "label": "Convexity", "type": "angle", "vectors": [["N", "A"], ["Pog", "A"]]},
@@ -26,6 +27,7 @@ ANGLE_STACK_CONFIG = [
     {"id": "L1_FH", "label": "L1 - FH", "type": "angle", "vectors": [["L1", "L1r"], ["Or", "Po"]]},
 ]
 
+# ===== ポリゴン行 =====
 POLYGON_ROWS = [
     ["00", 0.0, 0.0, 0.0],
     ["Facial", 83.1, 2.5, 0.1036],
@@ -37,7 +39,7 @@ POLYGON_ROWS = [
     ["SNA", 80.9, 3.1, 0.1250],
     ["SNB", 76.2, 2.8, 0.1286],
     ["SNA-SNB diff", 4.7, 1.8, 0.0714],
-    ["01", 0.0, 0.0, 0.0],
+    ["01", 0.0, 0.0, 0.0],  # くびれダミー
     ["Interincisal", 124.3, 6.9, 0.2500],
     ["U1 to FH plane", 109.8, 5.3, 0.1679],
     ["L1 to Mandibular", 93.8, 5.9, 0.2107],
@@ -63,7 +65,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
 
     html = """
     <style>
-      .ceph-wrapper{position:relative;width:min(100%,1200px);margin:0 auto;}
+      .ceph-wrapper{position:relative;width:min(100%,960px);margin:0 auto;}
       #ceph-image{width:100%;height:auto;display:block;pointer-events:none;user-select:none;-webkit-user-select:none;}
 
       #ceph-planes{position:absolute;inset:0;pointer-events:none;z-index:1;}
@@ -83,20 +85,32 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       .angle-row.dimmed{opacity:.45;}
       .angle-name,.angle-value{font-size:13px;font-weight:600;}
 
-      #coord-stack{margin-top:10px;border-top:1px solid rgba(255,255,255,.1);padding-top:8px;
-        font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;color:#cbd5e1;}
-      #coord-stack .row{display:flex;justify-content:space-between;gap:10px;}
-      #coord-stack .id{min-width:36px;font-weight:700;color:#e2e8f0;}
-
-      #std-poly-outline{fill:none;stroke:#e5e7eb;stroke-width:1.25;stroke-opacity:.9;}
+      /* ポリゴン線 */
+      #std-poly-outline{fill:none;stroke:#ffffff;stroke-width:1.5;stroke-opacity:1;}
       .std-centerline{stroke:#facc15;stroke-width:2;}
-      .std-hline{stroke:#ffffff;stroke-width:1.0;opacity:.85;}
-      #std-dot-spine{fill:none;stroke:#e5e7eb;stroke-width:2.0;opacity:.98;}
+      .std-hline{stroke:#ffffff;stroke-width:1.0;opacity:.9;}
 
+      /* スパイン（赤） */
+      #std-dot-spine{fill:none;stroke:#ef4444;stroke-width:2.0;}
+
+      /* 追加のコネクタ線（赤） */
+      .apex-connector{stroke:#ffffff;stroke-width:1.5;fill:none;}
+
+      /* 三角マーカー */
       .ceph-marker{position:absolute;transform:translate(-50%,0);cursor:grab;}
       .ceph-marker.dragging{cursor:grabbing;}
       .ceph-marker .pin{width:0;height:0;margin:0 auto;}
       .ceph-label{margin-top:2px;font-size:11px;font-weight:700;color:#f8fafc;text-shadow:0 1px 2px rgba(0,0,0,.6);text-align:center;}
+
+      /* 座標のまとめリスト（角度の下） */
+      #coords-stack{
+        margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.25);
+        display:flex;flex-direction:column;gap:4px;font:12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        color:#e2e8f0;
+      }
+      .coord-line{display:flex;justify-content:space-between;gap:12px;}
+      .coord-id{opacity:.9;}
+      .coord-xy{opacity:.95;}
     </style>
 
     <div class="ceph-wrapper">
@@ -104,9 +118,10 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       <svg id="ceph-planes"></svg>
       <svg id="ceph-overlay"></svg>
       <div id="ceph-stage"></div>
+
       <div id="angle-stack">
         __ANGLE_ROWS_HTML__
-        <div id="coord-stack"></div>
+        <div id="coords-stack"></div>
       </div>
     </div>
 
@@ -125,7 +140,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         const planesSvg = document.getElementById("ceph-planes");
         const overlaySvg= document.getElementById("ceph-overlay");
         const angleStack= document.getElementById("angle-stack");
-        const coordStack= document.getElementById("coord-stack");
+        const coordsStack = document.getElementById("coords-stack");
 
         const angleRows = Array.from(document.querySelectorAll("#angle-stack .angle-row"));
         const angleRowMap = Object.fromEntries(angleRows.map(r => [r.dataset.angle, {row:r, valueEl:r.querySelector(".angle-value")}]))
@@ -140,10 +155,10 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           const base = ANGLE_STACK_BASE_WIDTH || 900;
           const w = image.clientWidth || base;
           const scale = Math.min(1, w / base);
-          angleStack.style.transform = "scale(" + scale + ")";
+          angleStack.style.transform = `scale(${scale})`;
         }
 
-        // ===== 角度計算 =====
+        // ---- 角度計算 ----
         const computeAngle=(pairA,pairB)=>{
           const a1=markerById[pairA[0]], a2=markerById[pairA[1]], b1=markerById[pairB[0]], b2=markerById[pairB[1]];
           if(!a1||!a2||!b1||!b2) return null;
@@ -176,20 +191,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
-        // ===== 座標リスト =====
-        function renderCoordList(){
-          const ids = Object.keys(markerById).sort((a,b)=>a.localeCompare(b));
-          let html="";
-          ids.forEach(id=>{
-            const m = markerById[id]; if(!m) return;
-            const x = Math.round(parseFloat(m.dataset.left||"0"));
-            const y = Math.round(parseFloat(m.dataset.top ||"0"));
-            html += '<div class="row"><span class="id">'+id+'</span><span class="xy">(' + x + ', ' + y + ')</span></div>';
-          });
-          coordStack.innerHTML = html;
-        }
-
-        // ===== マーカー =====
+        // ---- マーカー ----
         function setPosition(m,left,top){
           const w=stage.clientWidth||1,h=stage.clientHeight||1;
           const cl=clamp(left,0,w), ct=clamp(top,0,h);
@@ -201,8 +203,8 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           const s=pt.size||28;
 
           const pin=document.createElement("div"); pin.className="pin";
-          pin.style.borderLeft=(s*0.25)+"px solid transparent";  // 底辺 半分
-          pin.style.borderRight=(s*0.25)+"px solid transparent";
+          pin.style.borderLeft=(s/2)+"px solid transparent";
+          pin.style.borderRight=(s/2)+"px solid transparent";
           pin.style.borderBottom=s+"px solid "+(pt.color||"#f97316");
           m.appendChild(pin);
 
@@ -233,12 +235,12 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             if(activeMarker!==m) return;
             const rect=stage.getBoundingClientRect();
             setPosition(m, ev.clientX-rect.left-dragOffset.x, ev.clientY-rect.top-dragOffset.y);
-            updatePlanes(); updateAngleStack(); redrawPolygonAndSpine(); renderCoordList();
+            updatePlanes(); updateAngleStack(); redrawPolygonAndSpine(); updateCoordsList();
           });
           const finish=()=>{
             if(activeMarker!==m) return;
             m.classList.remove("dragging"); activeMarker=null;
-            updatePlanes(); updateAngleStack(); redrawPolygonAndSpine(); renderCoordList();
+            updatePlanes(); updateAngleStack(); redrawPolygonAndSpine(); updateCoordsList();
           };
           m.addEventListener("pointerup", finish);
           m.addEventListener("pointercancel", finish);
@@ -258,10 +260,10 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
-        // ===== プレーン =====
+        // ---- プレーン ----
         function initPlanes(){
           planesSvg.innerHTML=""; planeLines.length=0;
-          planeDefs.forEach(pl=>{
+          (payload.planes||[]).forEach(pl=>{
             const line=document.createElementNS("http://www.w3.org/2000/svg","line");
             line.setAttribute("stroke",pl.color||"#f97316");
             line.setAttribute("stroke-width", String(pl.width||2));
@@ -283,7 +285,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
-        // ===== 角度カラム行の中心Y =====
+        // ---- 角度カラム中心Y ----
         function measureRowCentersMap(){
           const wrapRect = wrapper.getBoundingClientRect();
           const map = new Map();
@@ -295,7 +297,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           return map;
         }
 
-        // ===== ポリゴン + スパイン（最上に幅ゼロの1点を追加） =====
+        // ===== ポリゴン + スパイン + 追加コネクタ =====
         function redrawPolygonAndSpine(){
           if(!overlaySvg) return;
           const w=image.clientWidth||800, h=image.clientHeight||600;
@@ -303,6 +305,8 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           const offsetX = Math.round(w*0.20) + 60;
 
           const centersMap = measureRowCentersMap();
+
+          // 中心Y配列
           const ys = [];
           for(let i=0;i<POLYGON_ROWS.length;i++){
             const label = POLYGON_ROWS[i][0];
@@ -338,25 +342,30 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             }
           }
 
-          const gaps=[]; for(let i=1;i<ys.length;i++){ gaps.push(Math.abs(ys[i]-ys[i-1])); }
+          // 縦スケール
+          const gaps=[]; for(let i=1;i<ys.length;i++) gaps.push(Math.abs(ys[i]-ys[i-1]));
           const median = gaps.length? gaps.sort((a,b)=>a-b)[Math.floor(gaps.length/2)] : 24;
           const unit = Math.max(14, Math.round(median));
 
-          const topExtraY = ys[0] - unit;       // 1行分上へ延長
-          const ysEx = [topExtraY, ...ys];      // 先頭に追加
+          // 最上・最下ダミー
+          const topExtraY    = ys[0] - unit;
+          const bottomExtraY = ys[ys.length-1] + unit;
+          const ysEx = [topExtraY, ...ys, bottomExtraY];
 
+          // 左右幅
           const spread = row => (row[3] * SD_BASE * POLY_WIDTH_SCALE * unit);
           const leftXs  = POLYGON_ROWS.map(row => offsetX - spread(row));
           const rightXs = POLYGON_ROWS.map(row => offsetX + spread(row));
 
-          const leftEx  = [offsetX, ...leftXs];   // 最上点は幅ゼロ
-          const rightEx = [offsetX, ...rightXs];
+          const leftEx  = [offsetX, ...leftXs,  offsetX];
+          const rightEx = [offsetX, ...rightXs, offsetX];
 
+          // 描き直し
           overlaySvg.innerHTML="";
           const g=document.createElementNS("http://www.w3.org/2000/svg","g");
           overlaySvg.appendChild(g);
 
-          // 外形
+          // 外形ポリゴン（白）
           const pts=[];
           for(let i=0;i<ysEx.length;i++) pts.push(leftEx[i]+","+ysEx[i]);
           for(let i=ysEx.length-1;i>=0;i--) pts.push(rightEx[i]+","+ysEx[i]);
@@ -364,13 +373,13 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           poly.setAttribute("id","std-poly-outline"); poly.setAttribute("points", pts.join(" "));
           g.appendChild(poly);
 
-          // 中心線
+          // 中心線（黄）
           const center=document.createElementNS("http://www.w3.org/2000/svg","line");
           center.setAttribute("x1",offsetX); center.setAttribute("x2",offsetX);
           center.setAttribute("y1",ysEx[0]); center.setAttribute("y2",ysEx[ysEx.length-1]);
           center.setAttribute("class","std-centerline"); g.appendChild(center);
 
-          // 水平白線（ダミー除外）
+          // 行の水平線（ダミー除外）
           POLYGON_ROWS.forEach((row,i)=>{
             const label=row[0]; if(label==="00"||label==="01"||label==="ZZ") return;
             const hl=document.createElementNS("http://www.w3.org/2000/svg","line");
@@ -379,9 +388,9 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             hl.setAttribute("class","std-hline"); g.appendChild(hl);
           });
 
-          // 値スパイン（赤丸なし）
+          // スパイン（赤）
           const nodes=[];
-          nodes.push({x:offsetX, y:topExtraY}); // 追加の最上点
+          nodes.push({x:offsetX, y:topExtraY});
           for(let i=0;i<POLYGON_ROWS.length;i++){
             const label=POLYGON_ROWS[i][0];
             if(label==="00"||label==="01"||label==="ZZ") continue;
@@ -392,37 +401,96 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             const x = offsetX + ((v-mean)/sd) * sd_px;
             nodes.push({x:x, y:ys[i]});
           }
+          nodes.push({x:offsetX, y:bottomExtraY});
           nodes.sort((a,b)=>a.y-b.y);
 
-          let spine = overlaySvg.querySelector("#std-dot-spine");
-          if(!spine){
-            spine = document.createElementNS("http://www.w3.org/2000/svg","polyline");
-            spine.setAttribute("id","std-dot-spine");
-            overlaySvg.appendChild(spine);
-          }
+          let spine = document.createElementNS("http://www.w3.org/2000/svg","polyline");
+          spine.setAttribute("id","std-dot-spine");
           spine.setAttribute("points", nodes.map(n=>n.x + "," + n.y).join(" "));
+          g.appendChild(spine);
+
+          // === 追加：最上点→Facial両肩、最下点→L1_FH両肩 を赤線で結ぶ ===
+          const idxFacial = POLYGON_ROWS.findIndex(r => r[0]==="Facial");
+          const idxL1FH   = POLYGON_ROWS.findIndex(r => r[0]==="L1_FH");
+          if (idxFacial >= 0){
+            // top apex (ysEx[0], offsetX) -> Facial left/right at ys[idxFacial]
+            const yTop = ysEx[0];
+            const yFac = ys[idxFacial];
+            const xLeftFac  = leftXs[idxFacial];
+            const xRightFac = rightXs[idxFacial];
+
+            const l1=document.createElementNS("http://www.w3.org/2000/svg","line");
+            l1.setAttribute("class","apex-connector");
+            l1.setAttribute("x1", String(offsetX)); l1.setAttribute("y1", String(yTop));
+            l1.setAttribute("x2", String(xLeftFac)); l1.setAttribute("y2", String(yFac));
+            g.appendChild(l1);
+
+            const l2=document.createElementNS("http://www.w3.org/2000/svg","line");
+            l2.setAttribute("class","apex-connector");
+            l2.setAttribute("x1", String(offsetX)); l2.setAttribute("y1", String(yTop));
+            l2.setAttribute("x2", String(xRightFac)); l2.setAttribute("y2", String(yFac));
+            g.appendChild(l2);
+          }
+          if (idxL1FH >= 0){
+            // bottom apex (ysEx[last], offsetX) -> L1_FH left/right at ys[idxL1FH]
+            const yBot = ysEx[ysEx.length-1];
+            const yL1  = ys[idxL1FH];
+            const xLeftL1  = leftXs[idxL1FH];
+            const xRightL1 = rightXs[idxL1FH];
+
+            const l3=document.createElementNS("http://www.w3.org/2000/svg","line");
+            l3.setAttribute("class","apex-connector");
+            l3.setAttribute("x1", String(offsetX)); l3.setAttribute("y1", String(yBot));
+            l3.setAttribute("x2", String(xLeftL1)); l3.setAttribute("y2", String(yL1));
+            g.appendChild(l3);
+
+            const l4=document.createElementNS("http://www.w3.org/2000/svg","line");
+            l4.setAttribute("class","apex-connector");
+            l4.setAttribute("x1", String(offsetX)); l4.setAttribute("y1", String(yBot));
+            l4.setAttribute("x2", String(xRightL1)); l4.setAttribute("y2", String(yL1));
+            g.appendChild(l4);
+          }
+          // === 追加ここまで ===
         }
 
-        // ===== レイアウト =====
+        // ---- 座標まとめ（角度の下） ----
+        function updateCoordsList(){
+          const list = document.getElementById("coords-stack");
+          if(!list) return;
+          list.innerHTML = "";
+          const order = (payload.points||[]).map(p=>p.id);
+          order.forEach(id=>{
+            const m = markerById[id];
+            if(!m) return;
+            const x = Math.round(parseFloat(m.dataset.left||"0"));
+            const y = Math.round(parseFloat(m.dataset.top||"0"));
+            const row = document.createElement("div");
+            row.className = "coord-line";
+            const a = document.createElement("div"); a.className="coord-id"; a.textContent = id;
+            const b = document.createElement("div"); b.className="coord-xy"; b.textContent = `(${x}, ${y})`;
+            row.appendChild(a); row.appendChild(b);
+            list.appendChild(row);
+          });
+        }
+
         function updateLayout(){
           const w=image.clientWidth||0, h=image.clientHeight||0;
           stage.style.width=w+"px"; stage.style.height=h+"px";
-          try{
-            syncAngleStackScale();
-            placeInitMarkersOnce(); initPlanes(); updatePlanes(); updateAngleStack(); redrawPolygonAndSpine(); renderCoordList();
-          }catch(e){ console.error(e); }
+          syncAngleStackScale();
+          placeInitMarkersOnce(); initPlanes(); updatePlanes(); updateAngleStack(); redrawPolygonAndSpine(); updateCoordsList();
         }
 
         window.addEventListener("pointerup", ()=>{
           if(activeMarker){ activeMarker.classList.remove("dragging"); activeMarker=null;
-            updatePlanes(); updateAngleStack(); redrawPolygonAndSpine(); renderCoordList(); }
+            updatePlanes(); updateAngleStack(); redrawPolygonAndSpine(); updateCoordsList(); }
         });
         window.addEventListener("pointercancel", ()=>{
           if(activeMarker){ activeMarker.classList.remove("dragging"); activeMarker=null;
-            updatePlanes(); updateAngleStack(); redrawPolygonAndSpine(); renderCoordList(); }
+            updatePlanes(); updateAngleStack(); redrawPolygonAndSpine(); updateCoordsList(); }
         });
 
         (payload.points||[]).forEach(pt=>createMarker(pt));
+
         if (image.complete && image.naturalWidth) updateLayout();
         else image.addEventListener("load", updateLayout, {once:true});
         window.addEventListener("resize", updateLayout);
@@ -441,25 +509,38 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
 
     return components.html(html, height=1100, scrolling=False)
 
+# ── 最小UIのみ（CEF03.mainは呼ばない） ──
 def slim_main() -> None:
     base.ensure_session_state()
+
     st.markdown("### 画像の選択")
-    uploaded = st.file_uploader("分析したいレントゲン画像をアップロードしてください。", type=["png","jpg","jpeg","gif","webp"])
+    uploaded = st.file_uploader(
+        "分析したいレントゲン画像をアップロードしてください。",
+        type=["png", "jpg", "jpeg", "gif", "webp"],
+    )
+
     if uploaded is not None:
         image_bytes = uploaded.read()
         mime = uploaded.type or "image/png"
-        st.session_state.default_image_data_url = base.to_data_url(image_bytes, mime)
+        image_data_url = base.to_data_url(image_bytes, mime)
+        st.session_state.default_image_data_url = image_data_url
+    else:
+        image_data_url = st.session_state.default_image_data_url
 
-    image_data_url = st.session_state.default_image_data_url
     if not image_data_url:
-        st.error("表示画像をuploadしてください。"); return
+        st.error("表示画像をuploadしてください。")
+        return
+
+    marker_size = 26
+    show_labels = True
 
     component_value = render_ceph_component(
         image_data_url=image_data_url,
-        marker_size=26,
-        show_labels=True,
+        marker_size=marker_size,
+        show_labels=show_labels,
         point_state=st.session_state.ceph_points,
     )
+
     if isinstance(component_value, dict):
         base.update_state_from_component(component_value)
 
