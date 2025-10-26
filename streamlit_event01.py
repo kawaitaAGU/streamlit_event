@@ -1,14 +1,18 @@
-# CEF23.py — single-canvas, no CEF03.sidebar, angle-stack scales (plan ②) + marker labels
+# CEF31.py — single-canvas / no sidebar / angle & coord stacks scale with image
+#            + marker labels + polygon + slim triangles (base = 50% of height)
 
 import json
 import streamlit as st
 import streamlit.components.v1 as components
-import CEF03 as base  # 画像/ポイント/プレーンのヘルパーだけ使う（mainは使わない）
+import CEF03 as base  # 画像/ポイント/プレーンのヘルパーのみ使用（mainは使わない）
 
 # ===== スケール設定 =====
-SD_BASE = 4.0                 # sd_ratio -> px 変換の基礎
-POLY_WIDTH_SCALE = 2.0        # ポリゴン横幅を2倍
-ANGLE_STACK_BASE_WIDTH = 900  # 角度カラムのスケール基準となる画像幅(px)
+SD_BASE = 4.0                  # sd_ratio -> px 変換の基礎
+POLY_WIDTH_SCALE = 2.0         # ポリゴン横幅を2倍
+ANGLE_STACK_BASE_WIDTH = 900   # 角度/座標カラムのスケール基準画像幅(px)
+
+# ★ 三角の底辺を細身に（高さsの50%）
+TRI_BASE_RATIO = 0.5           # さらに細くするなら 0.4 や 0.33 に
 
 # ===== 角度定義 =====
 ANGLE_STACK_CONFIG = [
@@ -65,38 +69,38 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
 
     html = """
     <style>
-      .ceph-wrapper{position:relative;width:min(100%,960px);margin:0 auto;}
+      .ceph-wrapper{position:relative;width:min(100%,1100px);margin:0 auto;}
       #ceph-image{width:100%;height:auto;display:block;pointer-events:none;user-select:none;-webkit-user-select:none;}
 
       #ceph-planes{position:absolute;inset:0;pointer-events:none;z-index:1;}
       #ceph-overlay{position:absolute;inset:0;pointer-events:none;z-index:2;}
       #ceph-stage{position:absolute;inset:0;pointer-events:auto;z-index:3;touch-action:none;}
 
-      #angle-stack{
-        position:absolute;top:56px;left:12px;
-        display:flex;flex-direction:column;gap:10px;
-        padding:10px 12px;border-radius:10px;
-        background:rgba(15,23,42,.78);color:#f8fafc;
+      /* 左上：角度カラムと座標カラム（画像幅に応じて scale） */
+      .left-stacks{position:absolute;top:56px;left:12px;transform-origin:top left;transform:scale(1);z-index:4;}
+      #angle-stack,#coord-stack{
+        background:rgba(15,23,42,.78);color:#f8fafc;border-radius:10px;
         font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-        pointer-events:none;z-index:4;min-width:140px;
-        transform-origin:top left;transform:scale(1);
+        padding:10px 12px;min-width:140px;margin-bottom:10px;pointer-events:none;
       }
       .angle-row{display:flex;justify-content:space-between;align-items:center;padding:2px 0;}
       .angle-row.dimmed{opacity:.45;}
       .angle-name,.angle-value{font-size:13px;font-weight:600;}
 
+      #coord-stack .coord-title{font-size:12px;font-weight:700;opacity:.8;margin-bottom:6px;}
+      #coord-stack .coord-item{font:11px/1.2 monospace;color:#e2e8f0;opacity:.95;}
+
+      /* ポリゴン線類＆ドット */
       #std-poly-outline{fill:none;stroke:#1e40af;stroke-width:1.25;stroke-opacity:.9;}
       .std-centerline{stroke:#facc15;stroke-width:2;}
       .std-hline{stroke:#ffffff;stroke-width:1.25;}
       .angle-dot{fill:#ef4444;stroke:#ffffff;stroke-width:1.5;}
 
-      .ceph-marker{position:absolute;transform:translate(-50%,0);cursor:grab;}
+      /* 三角マーカー（底辺を細身に） */
+      .ceph-marker{position:absolute;transform:translate(-50%,0);cursor:grab;text-align:center;}
       .ceph-marker.dragging{cursor:grabbing;}
       .ceph-marker .pin{width:0;height:0;margin:0 auto;}
-      .ceph-label{margin-top:2px;font-size:11px;font-weight:700;color:#f8fafc;text-shadow:0 1px 2px rgba(0,0,0,.6);text-align:center;}
-
-      .coord-tag{position:absolute;transform:translate(6px,-16px);background:rgba(15,23,42,.78);
-                 color:#e2e8f0;padding:2px 6px;border-radius:6px;font:11px/1.2 monospace;pointer-events:none;}
+      .ceph-label{margin-top:2px;font-size:11px;font-weight:700;color:#f8fafc;text-shadow:0 1px 2px rgba(0,0,0,.6);}
     </style>
 
     <div class="ceph-wrapper">
@@ -104,7 +108,14 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       <svg id="ceph-planes"></svg>
       <svg id="ceph-overlay"></svg>
       <div id="ceph-stage"></div>
-      <div id="angle-stack">__ANGLE_ROWS_HTML__</div>
+
+      <div class="left-stacks" id="left-stacks">
+        <div id="angle-stack">__ANGLE_ROWS_HTML__</div>
+        <div id="coord-stack">
+          <div class="coord-title">Coordinates (px)</div>
+          <div id="coord-items"></div>
+        </div>
+      </div>
     </div>
 
     <script>
@@ -113,33 +124,37 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       const SD_BASE = __SD_BASE__;
       const POLY_WIDTH_SCALE = __POLY_WIDTH_SCALE__;
       const ANGLE_STACK_BASE_WIDTH = __ANGLE_STACK_BASE_WIDTH__;
+      const TRI_BASE_RATIO = __TRI_BASE_RATIO__;
       const payload = __PAYLOAD_JSON__;
 
       (function(){
-        const wrapper = document.querySelector(".ceph-wrapper");
-        const image   = document.getElementById("ceph-image");
-        const stage   = document.getElementById("ceph-stage");
+        const wrapper   = document.querySelector(".ceph-wrapper");
+        const image     = document.getElementById("ceph-image");
+        const stage     = document.getElementById("ceph-stage");
         const planesSvg = document.getElementById("ceph-planes");
         const overlaySvg= document.getElementById("ceph-overlay");
+        const leftStacks= document.getElementById("left-stacks");
         const angleStack= document.getElementById("angle-stack");
+        const coordItems= document.getElementById("coord-items");
 
         const angleRows = Array.from(document.querySelectorAll("#angle-stack .angle-row"));
         const angleRowMap = Object.fromEntries(angleRows.map(r => [r.dataset.angle, {row:r, valueEl:r.querySelector(".angle-value")}]))
 
         const markers=[], markerById={}, planeDefs=(payload.planes||[]), planeLines=[];
         let activeMarker=null, dragOffset={x:0,y:0};
-        const coordTags = new Map();
 
         const clamp=(v,lo,hi)=>Math.min(Math.max(v,lo),hi);
         const xy = m => (!m?null:{x:parseFloat(m.dataset.left||"0"), y:parseFloat(m.dataset.top||"0")});
 
-        function syncAngleStackScale(){
+        // ========== 左スタックの scale を画像幅に同期 ==========
+        function syncStacksScale(){
           const base = ANGLE_STACK_BASE_WIDTH || 900;
           const w = image.clientWidth || base;
-          const scale = Math.min(1, w / base);
-          angleStack.style.transform = `scale(${scale})`;
+          const scale = Math.min(1, w / base);  // 大きくはしない
+          leftStacks.style.transform = "scale(" + scale + ")";
         }
 
+        // ========== 角度計算 ==========
         const computeAngle=(pairA,pairB)=>{
           const a1=markerById[pairA[0]], a2=markerById[pairA[1]], b1=markerById[pairB[0]], b2=markerById[pairB[1]];
           if(!a1||!a2||!b1||!b2) return null;
@@ -162,7 +177,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
               const a=cache.get(cfg.minuend), b=cache.get(cfg.subtrahend);
               if(a!=null && b!=null) v=a-b;
             }
-            if(cfg.id==="Convexity" && v!=null) v=180-v;
+            if(cfg.id==="Convexity" && v!=null) v=180-v; // 補角
             if(v==null || Number.isNaN(v)){
               entry.row.classList.add("dimmed"); entry.valueEl.textContent="--.-°"; angleCurrent.set(cfg.id,null);
             }else{
@@ -172,29 +187,43 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
+        // ========== 座標リスト ==========
+        const coordOrder = (payload.points || []).map(p=>p.id); // 表示順
+        function updateCoordStack(){
+          const fr = document.createDocumentFragment();
+          coordOrder.forEach(id=>{
+            const m = markerById[id]; if(!m) return;
+            const x = Math.round(parseFloat(m.dataset.left||"0"));
+            const y = Math.round(parseFloat(m.dataset.top||"0"));
+            const div = document.createElement("div");
+            div.className = "coord-item";
+            div.textContent = id.padEnd(3," ") + "  (" + x + ", " + y + ")";
+            fr.appendChild(div);
+          });
+          coordItems.innerHTML = "";
+          coordItems.appendChild(fr);
+        }
+
+        // ========== マーカー ==========
         function setPosition(m,left,top){
           const w=stage.clientWidth||1,h=stage.clientHeight||1;
           const cl=clamp(left,0,w), ct=clamp(top,0,h);
           m.style.left=cl+"px"; m.style.top=ct+"px"; m.dataset.left=cl; m.dataset.top=ct;
-          let tag = coordTags.get(m.dataset.id);
-          if(!tag){
-            tag = document.createElement("div"); tag.className="coord-tag";
-            stage.appendChild(tag); coordTags.set(m.dataset.id, tag);
-          }
-          tag.style.left = cl + "px"; tag.style.top = ct + "px";
-          tag.textContent = `(${Math.round(cl)}, ${Math.round(ct)})`;
         }
 
         function createMarker(pt){
           const m=document.createElement("div"); m.className="ceph-marker"; m.dataset.id=pt.id;
           const s=pt.size||28;
 
+          // 細身三角
           const pin=document.createElement("div"); pin.className="pin";
-          pin.style.borderLeft=(s/2)+"px solid transparent";
-          pin.style.borderRight=(s/2)+"px solid transparent";
-          pin.style.borderBottom=s+"px solid "+(pt.color||"#f97316");
+          const halfBase = (s * TRI_BASE_RATIO) / 2;
+          pin.style.borderLeft  = halfBase + "px solid transparent";
+          pin.style.borderRight = halfBase + "px solid transparent";
+          pin.style.borderBottom= s + "px solid " + (pt.color||"#f97316");
           m.appendChild(pin);
 
+          // ラベル（略号）
           const lbl = document.createElement("div");
           lbl.className = "ceph-label";
           lbl.textContent = pt.id;
@@ -212,6 +241,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
 
           stage.appendChild(m); markerById[pt.id]=m; markers.push(m);
 
+          // ドラッグ
           m.addEventListener("pointerdown",(ev)=>{
             const rect=stage.getBoundingClientRect();
             const left=parseFloat(m.dataset.left||"0"), top=parseFloat(m.dataset.top||"0");
@@ -222,12 +252,12 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             if(activeMarker!==m) return;
             const rect=stage.getBoundingClientRect();
             setPosition(m, ev.clientX-rect.left-dragOffset.x, ev.clientY-rect.top-dragOffset.y);
-            updatePlanes(); updateAngleStack(); redrawPolygonAndDots();
+            updatePlanes(); updateAngleStack(); redrawPolygonAndDots(); updateCoordStack();
           });
           const finish=()=>{
             if(activeMarker!==m) return;
             m.classList.remove("dragging"); activeMarker=null;
-            updatePlanes(); updateAngleStack(); redrawPolygonAndDots();
+            updatePlanes(); updateAngleStack(); redrawPolygonAndDots(); updateCoordStack();
           };
           m.addEventListener("pointerup", finish);
           m.addEventListener("pointercancel", finish);
@@ -247,6 +277,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
+        // ========== プレーン ==========
         function initPlanes(){
           planesSvg.innerHTML=""; planeLines.length=0;
           planeDefs.forEach(pl=>{
@@ -271,6 +302,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
+        // ========== 角度カラム行の中心Y（scale反映後） ==========
         function measureRowCentersMap(){
           const wrapRect = wrapper.getBoundingClientRect();
           const map = new Map();
@@ -282,6 +314,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           return map;
         }
 
+        // ========== ポリゴン＆赤丸 ==========
         function redrawPolygonAndDots(){
           if(!overlaySvg) return;
           const w=image.clientWidth||800, h=image.clientHeight||600;
@@ -294,6 +327,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             const label = POLYGON_ROWS[i][0];
 
             if(label==="01"){
+              // 直前直後の実データ行の中点
               let prevY=null, nextY=null;
               for(let p=i-1;p>=0;p--){
                 const lab=POLYGON_ROWS[p][0];
@@ -337,6 +371,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           const g=document.createElementNS("http://www.w3.org/2000/svg","g");
           overlaySvg.appendChild(g);
 
+          // 外形
           const pts=[];
           for(let i=0;i<POLYGON_ROWS.length;i++) pts.push(leftXs[i]+","+ys[i]);
           for(let i=POLYGON_ROWS.length-1;i>=0;i--) pts.push(rightXs[i]+","+ys[i]);
@@ -344,11 +379,13 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           poly.setAttribute("id","std-poly-outline"); poly.setAttribute("points", pts.join(" "));
           g.appendChild(poly);
 
+          // 中心線
           const center=document.createElementNS("http://www.w3.org/2000/svg","line");
           center.setAttribute("x1",offsetX); center.setAttribute("x2",offsetX);
           center.setAttribute("y1",ys[0]); center.setAttribute("y2",ys[ys.length-1]);
           center.setAttribute("class","std-centerline"); g.appendChild(center);
 
+          // 水平白線（ダミー除外）
           POLYGON_ROWS.forEach((row,i)=>{
             const label=row[0]; if(label==="00"||label==="01"||label==="ZZ") return;
             const hl=document.createElementNS("http://www.w3.org/2000/svg","line");
@@ -357,6 +394,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             hl.setAttribute("class","std-hline"); g.appendChild(hl);
           });
 
+          // 赤丸（ダミー除外）
           const dots=document.createElementNS("http://www.w3.org/2000/svg","g"); dots.setAttribute("id","std-value-dots"); g.appendChild(dots);
           POLYGON_ROWS.forEach((row,i)=>{
             const label=row[0]; if(label==="00"||label==="01"||label==="ZZ") return;
@@ -390,20 +428,21 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
+        // ========== レイアウト ==========
         function updateLayout(){
           const w=image.clientWidth||0, h=image.clientHeight||0;
           stage.style.width=w+"px"; stage.style.height=h+"px";
-          syncAngleStackScale();
-          placeInitMarkersOnce(); initPlanes(); updatePlanes(); updateAngleStack(); redrawPolygonAndDots();
+          syncStacksScale();
+          placeInitMarkersOnce(); initPlanes(); updatePlanes(); updateAngleStack(); redrawPolygonAndDots(); updateCoordStack();
         }
 
         window.addEventListener("pointerup", ()=>{
           if(activeMarker){ activeMarker.classList.remove("dragging"); activeMarker=null;
-            updatePlanes(); updateAngleStack(); redrawPolygonAndDots(); }
+            updatePlanes(); updateAngleStack(); redrawPolygonAndDots(); updateCoordStack(); }
         });
         window.addEventListener("pointercancel", ()=>{
           if(activeMarker){ activeMarker.classList.remove("dragging"); activeMarker=null;
-            updatePlanes(); updateAngleStack(); redrawPolygonAndDots(); }
+            updatePlanes(); updateAngleStack(); redrawPolygonAndDots(); updateCoordStack(); }
         });
 
         (payload.points||[]).forEach(pt=>createMarker(pt));
@@ -415,6 +454,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
     </script>
     """
 
+    # 置換
     html = html.replace("__IMAGE_DATA_URL__", image_data_url)
     html = html.replace("__ANGLE_ROWS_HTML__", angle_rows_html)
     html = html.replace("__ANGLE_CONFIG_JSON__", json.dumps(ANGLE_STACK_CONFIG))
@@ -422,11 +462,12 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
     html = html.replace("__SD_BASE__", json.dumps(SD_BASE))
     html = html.replace("__POLY_WIDTH_SCALE__", json.dumps(POLY_WIDTH_SCALE))
     html = html.replace("__ANGLE_STACK_BASE_WIDTH__", json.dumps(ANGLE_STACK_BASE_WIDTH))
+    html = html.replace("__TRI_BASE_RATIO__", json.dumps(TRI_BASE_RATIO))
     html = html.replace("__PAYLOAD_JSON__", payload_json)
 
     return components.html(html, height=1100, scrolling=False)
 
-# ── ここがポイント：CEF03.main() は呼ばない。最小UIの main を自前で用意 ──
+# ── 最小UIの main（CEF03.main は呼ばない） ──
 def slim_main() -> None:
     base.ensure_session_state()
 
@@ -448,7 +489,7 @@ def slim_main() -> None:
         st.error("表示画像をuploadしてください。")
         return
 
-    # 左カラム（サイドバー）は出さない。固定値を使う
+    # 固定値（サイドバーなし）
     marker_size = 26
     show_labels = True
 
