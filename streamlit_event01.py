@@ -1,4 +1,3 @@
-#
 import base64
 import math
 from pathlib import Path
@@ -251,10 +250,10 @@ def build_component_payload(
     y_positions = list(range(len(polygon_rows)))
     left_base = [-(ratio * SD_PERCENT_SCALE) for ratio in ratios]
     right_base = [(ratio * SD_PERCENT_SCALE) for ratio in ratios]
-    base_polygon_x = left_base[1:] + right_base[::-1][:-1] + [left_base[1]]
-    base_polygon_y = y_positions[1:] + y_positions[::-1][:-1] + [y_positions[1]]
+    base_polygon_x = left_base + right_base[::-1] + [left_base[0]]
+    base_polygon_y = y_positions + y_positions[::-1] + [y_positions[0]]
     x_min, x_max = -3.2, 3.2
-    overlay_x_min, overlay_x_max = 0.21, 0.53
+    overlay_x_min, overlay_x_max = 0.62, 0.94
     overlay_y_top, overlay_y_bottom = 0.82, 0.18
     max_y = len(polygon_rows) - 1
 
@@ -271,50 +270,28 @@ def build_component_payload(
         for x_value, y_value in zip(base_polygon_x, base_polygon_y)
     ]
 
-    angle_marker_colors = [
-        "#ef4444",
-        "#6366f1",
-        "#10b981",
-        "#f59e0b",
-        "#3b82f6",
-        "#ec4899",
-        "#22d3ee",
-        "#84cc16",
-        "#f97316",
-        "#14b8a6",
-        "#8b5cf6",
-        "#eab308",
-        "#0ea5e9",
-    ]
-
     polygon_markers: List[Dict[str, Any]] = []
-    for idx, row in enumerate(polygon_rows):
-        if row.sd == 0 or row.label in {"00", "01", "ZZ"}:
-            continue
-        base_offset = 0.0
-        if row.label == "Facial":
-            base_offset = SD_PERCENT_SCALE * 0.15
-        elif row.label == "Convexity":
-            base_offset = SD_PERCENT_SCALE * 0.35
-        elif row.label == "FH_mandiblar":
-            base_offset = SD_PERCENT_SCALE * 0.2
-        color = angle_marker_colors[idx % len(angle_marker_colors)]
+    try:
+        sna_index = next(idx for idx, row in enumerate(polygon_rows) if row.label == "SNA")
+        sna_row = polygon_rows[sna_index]
         polygon_markers.append(
             {
-                "id": f"marker_{row.label}",
-                "angle_id": row.label,
-                "color": color,
-                "size": 9,
-                "mean": row.mean,
-                "sd": row.sd,
-                "sd_ratio": row.sd_ratio,
+                "id": "SNA",
+                "angle_id": "SNA",
+                "color": "#ef4444",
+                "size": 10,
+                "mean": sna_row.mean,
+                "sd": sna_row.sd,
+                "sd_ratio": sna_row.sd_ratio,
                 "sd_scale": SD_PERCENT_SCALE,
                 "position": {
-                    "x": map_x(base_offset),
-                    "y": map_y(idx),
+                    "x": map_x((left_base[sna_index] + right_base[sna_index]) / 2),
+                    "y": map_y(y_positions[sna_index]),
                 },
             }
         )
+    except StopIteration:
+        pass
 
     angles_payload: List[Dict[str, Any]] = [
         {
@@ -349,8 +326,6 @@ def build_component_payload(
                 "color": item["color"],
                 "ratio_x": float(point_state.get(item["id"], {}).get("x_ratio", 0.5)),
                 "ratio_y": float(point_state.get(item["id"], {}).get("y_ratio", 0.5)),
-                "default_x": float(point_state.get(item["id"], {}).get("x_px", marker["default"][0])),
-                "default_y": float(point_state.get(item["id"], {}).get("y_px", marker["default"][1])),
             }
             for item in CEPH_POINTS
         ],
@@ -814,12 +789,9 @@ def main() -> None:
     points_px = build_points_px(st.session_state.ceph_stage, st.session_state.ceph_points)
     angles = compute_angles(points_px)
 
-    rows = create_results_table(angles)
-    points_table = build_points_table(points_px)
+    left_col, right_col = st.columns([1.3, 0.7])
 
-    plot_col, angles_col, coords_col = st.columns([2.0, 0.65, 0.65])
-
-    with plot_col:
+    with left_col:
         polygon_fig = build_polygon_figure(angles)
         if polygon_fig is not None:
             st.markdown("### 標準偏差ポリゴン")
@@ -831,32 +803,7 @@ def main() -> None:
         else:
             st.info("ポリゴン図を表示できる計測値がありません。")
 
-    with angles_col:
-        st.markdown("### 角度一覧")
-        slim_angle_rows = [
-            {"項目": row["計測項目"], "角度": row["角度 (°)"]}
-            for row in rows
-        ]
-        st.dataframe(
-            slim_angle_rows,
-            hide_index=True,
-            use_container_width=True,
-            height=420,
-        )
-
-    with coords_col:
-        st.markdown("### 座標一覧 (px)")
-        slim_points_rows = [
-            {"点": row["Point"], "x": row["x (px)"], "y": row["y (px)"]}
-            for row in points_table
-        ]
-        st.dataframe(
-            slim_points_rows,
-            hide_index=True,
-            use_container_width=True,
-            height=420,
-        )
-
+    with right_col:
         stage = st.session_state.ceph_stage
         st.markdown(
             f"""
