@@ -3,7 +3,7 @@
 iPhone でページ全体のピンチズームを有効にしつつ、
 従来の CEF46 ベースの描画・ドラッグ機能を維持したバージョン。
 """
-#
+
 import json
 import streamlit as st
 import streamlit.components.v1 as components
