@@ -1,12 +1,13 @@
-# CEF44.py — CEF43の最小修正
-# - 補助線（VTOP/Facial, VBOT/L1-FH）を削除→二重線解消
-# - 患者折れ線を赤色に変更
-# - それ以外（ピンチ、ドラッグ、座標カラム、三角幅1/2）は据え置き
+# CEF45.py — minimal fixes:
+# - centerline & patient endpoints use the SAME rounded coords as polygon apex  // ★
+# - smoother iPhone drag via setPointerCapture / releasePointerCapture          // ★
+# - remove preventDefault on pointerdown to not hinder pinch-zoom               // ★
+# - keep everything else as-is (thin triangles, scaling, coord stack)
 
 import json
 import streamlit as st
 import streamlit.components.v1 as components
-import CEF03 as base  # 画像/ポイント/プレーンのヘルパのみ使用（mainは呼ばない）
+import CEF03 as base
 
 SD_BASE = 4.0
 POLY_WIDTH_SCALE = 2.0
@@ -28,7 +29,6 @@ ANGLE_STACK_CONFIG = [
     {"id": "L1_FH", "label": "L1 - FH", "type": "angle", "vectors": [["L1", "L1r"], ["Or", "Po"]]},
 ]
 
-# VTOP/VBOT を含む
 POLYGON_ROWS = [
     ["VTOP", 0.0, 0.0, 0.0],
     ["00", 0.0, 0.0, 0.0],
@@ -87,20 +87,15 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       .angle-row.dimmed{opacity:.45;}
       .angle-name,.angle-value{font-size:13px;font-weight:600;}
 
-      /* 座標スタック */
       #coord-stack{margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,.18);
                    font-size:11px;line-height:1.25;max-height:200px;overflow:auto;white-space:nowrap;}
       #coord-stack .coord-item{display:flex;justify-content:space-between;gap:10px;opacity:.9;}
 
-      /* ポリゴン（白） */
       #std-poly-outline{fill:none;stroke:#ffffff;stroke-width:1.6;stroke-opacity:.95;}
       .std-centerline{stroke:#facc15;stroke-width:2;}
       .std-hline{stroke:#ffffff;stroke-width:1.1;}
-
-      /* 患者折れ線（赤） */
       .std-patient{stroke:#ef4444;stroke-width:2;fill:none;}
 
-      /* マーカー（底辺1/2） */
       .ceph-marker{position:absolute;transform:translate(-50%,0);cursor:grab;}
       .ceph-marker.dragging{cursor:grabbing;}
       .ceph-marker .pin{width:0;height:0;margin:0 auto;}
@@ -193,10 +188,11 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           }).join("");
         }
 
-        // 三角（底辺1/2）
+        // ===== markers (thin triangles) =====
         function setPosition(m,left,top){
           const w=stage.clientWidth||1,h=stage.clientHeight||1;
-          const cl=clamp(left,0,w), ct=clamp(top,0,h);
+          const cl=Math.round(clamp(left,0,w));   // ★ 整数化
+          const ct=Math.round(clamp(top,0,h));    // ★ 整数化
           m.style.left=cl+"px"; m.style.top=ct+"px"; m.dataset.left=cl; m.dataset.top=ct;
         }
         function createMarker(pt){
@@ -227,10 +223,12 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           stage.appendChild(m); markerById[pt.id]=m; markers.push(m);
 
           m.addEventListener("pointerdown",(ev)=>{
+            // ev.preventDefault(); // ★ 解除：ピンチ阻害を避ける
+            m.setPointerCapture?.(ev.pointerId);  // ★ iPhoneでのドラッグ安定
             const rect=stage.getBoundingClientRect();
             const left=parseFloat(m.dataset.left||"0"), top=parseFloat(m.dataset.top||"0");
             dragOffset={x:ev.clientX-(rect.left+left), y:ev.clientY-(rect.top+top)};
-            activeMarker=m; m.classList.add("dragging"); ev.preventDefault();
+            activeMarker=m; m.classList.add("dragging");
           });
           m.addEventListener("pointermove",(ev)=>{
             if(activeMarker!==m) return;
@@ -240,6 +238,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
           const finish=()=>{
             if(activeMarker!==m) return;
+            m.releasePointerCapture?.(event?.pointerId); // ★
             m.classList.remove("dragging"); activeMarker=null;
             updatePlanes(); updateAngleStack(); redrawPolygon(); updateCoordStack();
           };
@@ -261,10 +260,10 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
-        // プレーン
+        // ===== planes =====
         function initPlanes(){
           planesSvg.innerHTML=""; planeLines.length=0;
-          planeDefs.forEach(pl=>{
+          (payload.planes||[]).forEach(pl=>{
             const line=document.createElementNS("http://www.w3.org/2000/svg","line");
             line.setAttribute("stroke",pl.color||"#f97316");
             line.setAttribute("stroke-width", String(pl.width||2));
@@ -287,7 +286,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
-        // 角度カラム中心Y計測
+        // ===== polygon =====
         function measureRowCentersMap(){
           const wrapRect = wrapper.getBoundingClientRect();
           const map = new Map();
@@ -299,7 +298,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           return map;
         }
 
-        // ===== ポリゴン（白外枠＋水平線＋患者 赤ポリライン） =====
         function redrawPolygon(){
           if(!overlaySvg) return;
           const w=image.clientWidth||800, h=image.clientHeight||600;
@@ -309,14 +307,12 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           const centersMap = measureRowCentersMap();
           const ys = new Array(POLYGON_ROWS.length).fill(null);
 
-          // 実データ行のY
           for(let i=0;i<POLYGON_ROWS.length;i++){
             const label = POLYGON_ROWS[i][0];
             if(label==="00"||label==="01"||label==="ZZ"||label==="VTOP"||label==="VBOT") continue;
             const cy = centersMap.get(label);
             if (typeof cy === "number") ys[i] = cy;
           }
-          // 補間
           for(let i=0;i<ys.length;i++){
             if(ys[i]==null){
               let prev=null,next=null;
@@ -329,12 +325,10 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             }
           }
 
-          // unit
           const gaps=[]; for(let i=1;i<ys.length;i++) gaps.push(Math.abs(ys[i]-ys[i-1]));
           const median = gaps.length? gaps.sort((a,b)=>a-b)[Math.floor(gaps.length/2)] : 24;
           const unit = Math.max(14, Math.round(median));
 
-          // VTOP/VBOT 位置
           const idxVTOP = POLYGON_ROWS.findIndex(r=>r[0]==="VTOP");
           const idxVBOT = POLYGON_ROWS.findIndex(r=>r[0]==="VBOT");
           let firstRealY=null, lastRealY=null;
@@ -349,59 +343,57 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           if(idxVTOP>=0 && firstRealY!=null) ys[idxVTOP] = firstRealY - unit;
           if(idxVBOT>=0 && lastRealY!=null)  ys[idxVBOT] = lastRealY + unit;
 
-          // 横スプレッド
+          // ★ 以降、整数座標で統一（ズレ防止）
+          const yInt = ys.map(v=>Math.round(v));
+          const offsetXInt = Math.round(offsetX);
+
           const spread = row => (row[3] * SD_BASE * POLY_WIDTH_SCALE * unit);
-          const leftXs  = POLYGON_ROWS.map(row => offsetX - spread(row));
-          const rightXs = POLYGON_ROWS.map(row => offsetX + spread(row));
+          const leftXs  = POLYGON_ROWS.map(row => Math.round(offsetX - spread(row)));
+          const rightXs = POLYGON_ROWS.map(row => Math.round(offsetX + spread(row)));
 
           overlaySvg.innerHTML="";
           const g=document.createElementNS("http://www.w3.org/2000/svg","g");
           overlaySvg.appendChild(g);
 
-          // 外形（完全クローズ）
           const pts=[];
-          for(let i=0;i<POLYGON_ROWS.length;i++) pts.push(leftXs[i]+","+ys[i]);
-          for(let i=POLYGON_ROWS.length-1;i>=0;i--) pts.push(rightXs[i]+","+ys[i]);
+          for(let i=0;i<POLYGON_ROWS.length;i++) pts.push(leftXs[i]+","+yInt[i]);
+          for(let i=POLYGON_ROWS.length-1;i>=0;i--) pts.push(rightXs[i]+","+yInt[i]);
           const poly=document.createElementNS("http://www.w3.org/2000/svg","polygon");
           poly.setAttribute("id","std-poly-outline"); poly.setAttribute("points", pts.join(" "));
           g.appendChild(poly);
 
-          // 中心線
           const center=document.createElementNS("http://www.w3.org/2000/svg","line");
-          center.setAttribute("x1",offsetX); center.setAttribute("x2",offsetX);
-          center.setAttribute("y1",ys[0]);   center.setAttribute("y2",ys[ys.length-1]);
+          center.setAttribute("x1",offsetXInt); center.setAttribute("x2",offsetXInt);
+          center.setAttribute("y1",yInt[0]);   center.setAttribute("y2",yInt[yInt.length-1]);  // ★
           center.setAttribute("class","std-centerline"); g.appendChild(center);
 
-          // 各行の水平白線
           POLYGON_ROWS.forEach((row,i)=>{
             const label=row[0]; if(label==="00"||label==="01"||label==="ZZ"||label==="VTOP"||label==="VBOT") return;
             const hl=document.createElementNS("http://www.w3.org/2000/svg","line");
             hl.setAttribute("x1", String(leftXs[i])); hl.setAttribute("x2", String(rightXs[i]));
-            hl.setAttribute("y1", String(ys[i]));     hl.setAttribute("y2", String(ys[i]));
+            hl.setAttribute("y1", String(yInt[i]));   hl.setAttribute("y2", String(yInt[i]));
             hl.setAttribute("class","std-hline"); g.appendChild(hl);
           });
 
-          // 患者 赤ポリライン（VTOP中心→各行→VBOT中心）
+          // 患者 赤ポリライン（VTOP中心→各行→VBOT中心） — 端点も整数座標に  // ★
           const patientPts=[];
-          if(idxVTOP>=0) patientPts.push([offsetX, ys[idxVTOP]]);
+          if(idxVTOP>=0) patientPts.push([offsetXInt, yInt[idxVTOP]]);
           POLYGON_ROWS.forEach((row,i)=>{
             const label=row[0]; if(label==="00"||label==="01"||label==="ZZ"||label==="VTOP"||label==="VBOT") return;
             const mean=row[1], sd=row[2], ratio=row[3];
             const val = angleCurrent.get(label);
             if(!sd || !ratio || val==null || !isFinite(val)) return;
             const sd_px = ratio * SD_BASE * POLY_WIDTH_SCALE * unit;
-            const x = offsetX + ((val-mean)/sd) * sd_px;
-            patientPts.push([x, ys[i]]);
+            const x = Math.round(offsetX + ((val-mean)/sd) * sd_px);  // ★
+            patientPts.push([x, yInt[i]]);
           });
-          if(idxVBOT>=0) patientPts.push([offsetX, ys[idxVBOT]]);
+          if(idxVBOT>=0) patientPts.push([offsetXInt, yInt[idxVBOT]]);
           if(patientPts.length>=2){
             const pl=document.createElementNS("http://www.w3.org/2000/svg","polyline");
             pl.setAttribute("class","std-patient");
             pl.setAttribute("points", patientPts.map(p=>p[0]+","+p[1]).join(" "));
             g.appendChild(pl);
           }
-
-          // ※ 以前の白補助線（頂点↔両肩）は外形と重複するため削除
         }
 
         function updateLayout(){
