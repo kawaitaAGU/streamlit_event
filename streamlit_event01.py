@@ -1,5 +1,5 @@
-# CEF50.py — iPhoneで“ページ全体ピンチズーム”を確実に許可する最小修正
-# ポイント: touch-action を auto に統一 / preventDefault はタッチ時はしない / scrolling=True
+# CEF51.py — iPhoneで“ページ全体ピンチズーム”復活の最小修正
+# 1) viewport 挿入 2) touch-action: pinch-zoom 3) 2本指でドラッグを即キャンセル
 import json
 import streamlit as st
 import streamlit.components.v1 as components
@@ -51,7 +51,6 @@ def render_ceph_component(image_data_url:str, marker_size:int, show_labels:bool,
         image_data_url=image_data_url, marker_size=marker_size,
         show_labels=show_labels, point_state=point_state
     )
-
     angle_rows_html = "".join(
         f'<div class="angle-row" data-angle="{c["id"]}"><span class="angle-name">{c["label"]}</span><span class="angle-value">--.-°</span></div>'
         for c in ANGLE_STACK_CONFIG
@@ -59,8 +58,8 @@ def render_ceph_component(image_data_url:str, marker_size:int, show_labels:bool,
 
     html = """
 <style>
-  /* ▼ピンチを妨げない: 全体/ステージ/マーカーに auto を適用 */
-  .ceph-wrapper, #ceph-stage, .ceph-marker { touch-action: auto !important; }
+  /* ← ピンチ許可（iOSでも効く値）。auto より明示で安定 */
+  .ceph-wrapper, #ceph-stage, .ceph-marker { touch-action: pinch-zoom !important; }
 
   .ceph-wrapper{position:relative;width:min(100%,960px);margin:0 auto;}
   #ceph-image{width:100%;height:auto;display:block;pointer-events:none;user-select:none;-webkit-user-select:none;}
@@ -78,14 +77,12 @@ def render_ceph_component(image_data_url:str, marker_size:int, show_labels:bool,
   .angle-row.dimmed{opacity:.45;}
   .angle-name,.angle-value{font-size:13px;font-weight:600;}
 
-  /* 白ポリゴンとガイド */
   #std-poly-outline{fill:none;stroke:#ffffff;stroke-width:1.6;stroke-opacity:.95;}
   .std-centerline{stroke:#facc15;stroke-width:2;}
   .std-hline{stroke:#ffffff;stroke-width:1.1;}
   .std-helper{stroke:#ffffff;stroke-width:1.4;}
-  .std-guide{stroke:#ef4444;stroke-width:1.1;stroke-opacity:.9;} /* 患者値=赤 */
+  .std-guide{stroke:#ef4444;stroke-width:1.1;stroke-opacity:.9;}
 
-  /* 細い三角（底辺1/2） */
   .ceph-marker{position:absolute;transform:translate(-50%,0);cursor:grab;}
   .ceph-marker.dragging{cursor:grabbing;}
   .ceph-marker .pin{width:0;height:0;margin:0 auto;}
@@ -101,6 +98,13 @@ def render_ceph_component(image_data_url:str, marker_size:int, show_labels:bool,
 </div>
 
 <script>
+  // ① iframe内でもピンチ可能に: viewport を強制挿入
+  (function ensureViewport(){
+    let m=document.querySelector('meta[name="viewport"]');
+    if(!m){ m=document.createElement('meta'); m.name='viewport'; document.head.appendChild(m); }
+    m.setAttribute('content','width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=8, user-scalable=yes');
+  })();
+
   const ANGLE_CONFIG = __ANGLE_CONFIG_JSON__;
   const POLYGON_ROWS = __POLY_ROWS_JSON__;
   const SD_BASE = __SD_BASE__;
@@ -121,6 +125,14 @@ def render_ceph_component(image_data_url:str, marker_size:int, show_labels:bool,
 
     const markers=[], markerById={}, planeDefs=(payload.planes||[]), planeLines=[];
     let activeMarker=null, dragOffset={x:0,y:0};
+
+    // ② 2本指でドラッグをキャンセル（ピンチ優先）
+    const touchPointers = new Set();
+    window.addEventListener('pointerdown', e=>{ if(e.pointerType==='touch') touchPointers.add(e.pointerId); });
+    const _clearPtr = e=>{ if(e.pointerType==='touch') touchPointers.delete(e.pointerId); };
+    window.addEventListener('pointerup', _clearPtr);
+    window.addEventListener('pointercancel', _clearPtr);
+    window.addEventListener('pointerout', _clearPtr);
 
     const clamp=(v,lo,hi)=>Math.min(Math.max(v,lo),hi);
     const xy = m => (!m?null:{x:parseFloat(m.dataset.left||"0"), y:parseFloat(m.dataset.top||"0")});
@@ -184,13 +196,20 @@ def render_ceph_component(image_data_url:str, marker_size:int, show_labels:bool,
       stage.appendChild(m); markerById[pt.id]=m; markers.push(m);
 
       m.addEventListener("pointerdown",(ev)=>{
+        // すでに別の指がある＝ピンチ開始なのでドラッグに入らない
+        if (ev.pointerType==='touch' && touchPointers.size>=1) return;
         const rect=stage.getBoundingClientRect();
         const left=parseFloat(m.dataset.left||"0"), top=parseFloat(m.dataset.top||"0");
         dragOffset={x:ev.clientX-(rect.left+left), y:ev.clientY-(rect.top+top)};
         activeMarker=m; m.classList.add("dragging");
-        if (ev.pointerType !== "touch") ev.preventDefault(); // タッチでは抑止しない
+        if (ev.pointerType !== "touch") ev.preventDefault(); // タッチは既定動作許可（ピンチ用）
       });
       m.addEventListener("pointermove",(ev)=>{
+        // 2本指以上になったら即キャンセル（ピンチ優先）
+        if (ev.pointerType==='touch' && touchPointers.size>=2) {
+          if (activeMarker===m) { m.classList.remove("dragging"); activeMarker=null; }
+          return;
+        }
         if(activeMarker!==m) return;
         const rect=stage.getBoundingClientRect();
         setPosition(m, ev.clientX-rect.left-dragOffset.x, ev.clientY-rect.top-dragOffset.y);
@@ -405,7 +424,7 @@ def render_ceph_component(image_data_url:str, marker_size:int, show_labels:bool,
     html = html.replace("__ANGLE_STACK_BASE_WIDTH__", json.dumps(ANGLE_STACK_BASE_WIDTH))
     html = html.replace("__PAYLOAD_JSON__", payload_json)
 
-    # ▼iframe 側のスクロール/ズーム抑止を避ける
+    # ページのジェスチャーを阻害しない
     return components.html(html, height=1100, scrolling=True)
 
 def slim_main():
