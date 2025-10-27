@@ -1,4 +1,4 @@
-# CEF45.py — minimal fixes:
+# CEF46.py — minimal fixes:
 # - centerline & patient endpoints use the SAME rounded coords as polygon apex  // ★
 # - smoother iPhone drag via setPointerCapture / releasePointerCapture          // ★
 # - remove preventDefault on pointerdown to not hinder pinch-zoom               // ★
@@ -72,8 +72,15 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       #ceph-image{width:100%;height:auto;display:block;pointer-events:none;user-select:none;-webkit-user-select:none;}
       #ceph-planes{position:absolute;inset:0;pointer-events:none;z-index:1;}
       #ceph-overlay{position:absolute;inset:0;pointer-events:none;z-index:2;}
-      #ceph-stage{position:absolute;inset:0;pointer-events:auto;z-index:3;}
-
+      #ceph-stage{
+  position:absolute;
+  inset:0;
+  pointer-events:auto;
+  z-index:3;
+  touch-action:pinch-zoom;   /* ← ★ ピンチズームを許可 */
+  -webkit-user-select:none;
+  user-select:none;
+}
       #angle-stack{
         position:absolute;top:56px;left:12px;
         display:flex;flex-direction:column;gap:8px;
