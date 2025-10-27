@@ -1,4 +1,4 @@
-# enlarge01.py
+# enlarge01＿２.py
 import streamlit as st
 from PIL import Image, ImageOps
 
