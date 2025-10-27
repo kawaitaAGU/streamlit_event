@@ -170,6 +170,8 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
 
     const markers=[], markerById={}, planeDefs=(payload.planes||[]), planeLines=[];
     const activeTouches = new Set();
+    const globalTouches = new Set();
+    let stagePointerDisabled = false;
     let activeMarker=null;
     let dragOffset={x:0,y:0};
     let activePointerId=null;
@@ -263,6 +265,37 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       m.dataset.ratioY = h ? (ct / h) : 0;
     }
 
+    const updateStagePointerState = ()=>{
+      if(globalTouches.size>=2){
+        if(!stagePointerDisabled){
+          stage.style.pointerEvents='none';
+          stagePointerDisabled=true;
+        }
+      }else if(stagePointerDisabled){
+        stage.style.pointerEvents='auto';
+        stagePointerDisabled=false;
+      }
+    };
+
+    window.addEventListener("pointerdown",(ev)=>{
+      if(ev.pointerType==="touch"){
+        globalTouches.add(ev.pointerId);
+        updateStagePointerState();
+      }
+    }, true);
+    window.addEventListener("pointerup",(ev)=>{
+      if(ev.pointerType==="touch"){
+        globalTouches.delete(ev.pointerId);
+        updateStagePointerState();
+      }
+    }, true);
+    window.addEventListener("pointercancel",(ev)=>{
+      if(ev.pointerType==="touch"){
+        globalTouches.delete(ev.pointerId);
+        updateStagePointerState();
+      }
+    }, true);
+
     function createMarker(pt){
       const m=document.createElement("div");
       m.className="ceph-marker";
@@ -303,7 +336,8 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       m.addEventListener("pointerdown",(ev)=>{
         if(ev.pointerType==="touch"){
           activeTouches.add(ev.pointerId);
-          if(activeTouches.size>=2){
+          if(globalTouches.size>=2){
+            activeTouches.delete(ev.pointerId);
             return;
           }
         }else{
@@ -319,7 +353,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       });
 
       m.addEventListener("pointermove",(ev)=>{
-        if(ev.pointerType==="touch" && activeTouches.size>=2){
+        if(ev.pointerType==="touch" && globalTouches.size>=2){
           if(activeMarker===m){
             if(activePointerId!=null){
               try{ m.releasePointerCapture?.(activePointerId); }catch(e){}
@@ -556,7 +590,11 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
     }
 
     window.addEventListener("pointerup", (ev)=>{
-      if(ev.pointerType==="touch") activeTouches.delete(ev.pointerId);
+      if(ev.pointerType==="touch"){
+        activeTouches.delete(ev.pointerId);
+        globalTouches.delete(ev.pointerId);
+        updateStagePointerState();
+      }
       if(activeMarker){
         activeMarker.classList.remove("dragging");
         activeMarker=null;
@@ -570,7 +608,11 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
     });
 
     window.addEventListener("pointercancel", (ev)=>{
-      if(ev.pointerType==="touch") activeTouches.delete(ev.pointerId);
+      if(ev.pointerType==="touch"){
+        activeTouches.delete(ev.pointerId);
+        globalTouches.delete(ev.pointerId);
+        updateStagePointerState();
+      }
       if(activeMarker){
         activeMarker.classList.remove("dragging");
         activeMarker=null;
