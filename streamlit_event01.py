@@ -70,10 +70,19 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
     html = """
 <style>
   :where(body){margin:0;}
-  .ceph-wrapper{
+  .ceph-viewport{
     position:relative;
     width:min(100%,960px);
     margin:0 auto;
+    overflow:hidden;
+    touch-action:pan-x pan-y;
+    contain:layout paint size;
+  }
+  .ceph-wrapper{
+    position:relative;
+    width:100%;
+    touch-action:none;
+    will-change:transform;
   }
   #ceph-image{
     width:100%;
@@ -160,14 +169,16 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
   }
 </style>
 
-<div class="ceph-wrapper">
-  <img id="ceph-image" src="__IMAGE_DATA_URL__" alt="cephalometric background"/>
-  <svg id="ceph-planes"></svg>
-  <svg id="ceph-overlay"></svg>
-  <div id="ceph-stage"></div>
-  <div id="angle-stack">
-    __ANGLE_ROWS_HTML__
-    <div id="coord-stack"></div>
+<div class="ceph-viewport">
+  <div class="ceph-wrapper">
+    <img id="ceph-image" src="__IMAGE_DATA_URL__" alt="cephalometric background"/>
+    <svg id="ceph-planes"></svg>
+    <svg id="ceph-overlay"></svg>
+    <div id="ceph-stage"></div>
+    <div id="angle-stack">
+      __ANGLE_ROWS_HTML__
+      <div id="coord-stack"></div>
+    </div>
   </div>
 </div>
 
@@ -190,15 +201,16 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
   const payload = __PAYLOAD_JSON__;
 
   (function(){
-    const wrapper = document.querySelector(".ceph-wrapper");
-    const image   = document.getElementById("ceph-image");
-    const stage   = document.getElementById("ceph-stage");
+    const viewport = document.querySelector(".ceph-viewport");
+    const wrapper  = document.querySelector(".ceph-wrapper");
+    const image    = document.getElementById("ceph-image");
+    const stage    = document.getElementById("ceph-stage");
     const planesSvg = document.getElementById("ceph-planes");
     const overlaySvg= document.getElementById("ceph-overlay");
     const angleStack= document.getElementById("angle-stack");
     const coordStack= document.getElementById("coord-stack");
 
-    if(!wrapper || !image || !stage || !planesSvg || !angleStack || !coordStack){
+    if(!viewport || !wrapper || !image || !stage || !planesSvg || !angleStack || !coordStack){
       return;
     }
 
@@ -216,9 +228,147 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
     let activeMarker=null;
     let activePointerId=null;
     let dragOffset={x:0,y:0};
-    const touchPointers=new Set();
+    const touchPointers=new Map();
+    let pinchState=null;
+    const viewportState={scale:1, translateX:0, translateY:0, minScale:1, maxScale:4};
+    let hasInitialLayout=false;
+
+    wrapper.style.transformOrigin="0 0";
+    wrapper.style.transform="translate(0px, 0px) scale(1)";
 
     const clamp=(v,lo,hi)=>Math.min(Math.max(v,lo),hi);
+    const pointerEntries = () => Array.from(touchPointers.values()).slice(0,2);
+
+    function contentBaseSize(){
+      const width = stage.clientWidth || stage.offsetWidth || image.naturalWidth || image.clientWidth || viewport.clientWidth || 1;
+      const height = stage.clientHeight || stage.offsetHeight || image.naturalHeight || image.clientHeight || viewport.clientHeight || 1;
+      return {width, height};
+    }
+
+    function applyViewportTransform(){
+      wrapper.style.transform = "translate(" + viewportState.translateX + "px," + viewportState.translateY + "px) scale(" + viewportState.scale + ")";
+    }
+
+    function clampViewportTranslate(){
+      const viewWidth = viewport.clientWidth || 0;
+      const viewHeight = viewport.clientHeight || 0;
+      const base = contentBaseSize();
+      const contentWidth = base.width * viewportState.scale;
+      const contentHeight = base.height * viewportState.scale;
+      const minX = Math.min(0, viewWidth - contentWidth);
+      const minY = Math.min(0, viewHeight - contentHeight);
+      viewportState.translateX = clamp(viewportState.translateX, minX, 0);
+      viewportState.translateY = clamp(viewportState.translateY, minY, 0);
+    }
+
+    function resetViewportTransform(){
+      viewportState.scale = 1;
+      viewportState.translateX = 0;
+      viewportState.translateY = 0;
+      applyViewportTransform();
+    }
+
+    function clientToStage(clientX, clientY){
+      const rect = viewport.getBoundingClientRect();
+      const scale = viewportState.scale || 1;
+      return {
+        x: (clientX - rect.left - viewportState.translateX) / scale,
+        y: (clientY - rect.top - viewportState.translateY) / scale,
+      };
+    }
+
+    function resetPinchBaseline(){
+      const pts = pointerEntries();
+      if(pts.length<2){
+        pinchState=null;
+        return;
+      }
+      const dx = pts[1].x - pts[0].x;
+      const dy = pts[1].y - pts[0].y;
+      const distance = Math.hypot(dx, dy);
+      if(distance<=0){
+        pinchState=null;
+        return;
+      }
+      const center = {x:(pts[0].x+pts[1].x)/2, y:(pts[0].y+pts[1].y)/2};
+      const localCenter = clientToStage(center.x, center.y);
+      pinchState = {
+        startDistance: distance,
+        startScale: viewportState.scale,
+        localCenter,
+      };
+    }
+
+    function updatePinch(){
+      if(!pinchState) return;
+      const pts = pointerEntries();
+      if(pts.length<2){
+        pinchState=null;
+        return;
+      }
+      const dx = pts[1].x - pts[0].x;
+      const dy = pts[1].y - pts[0].y;
+      const distance = Math.hypot(dx, dy);
+      if(distance<=0) return;
+      const center = {x:(pts[0].x+pts[1].x)/2, y:(pts[0].y+pts[1].y)/2};
+      const rawScale = pinchState.startScale * (distance / pinchState.startDistance);
+      viewportState.scale = clamp(rawScale, viewportState.minScale, viewportState.maxScale);
+      const rect = viewport.getBoundingClientRect();
+      viewportState.translateX = center.x - rect.left - pinchState.localCenter.x * viewportState.scale;
+      viewportState.translateY = center.y - rect.top - pinchState.localCenter.y * viewportState.scale;
+      clampViewportTranslate();
+      applyViewportTransform();
+    }
+
+    function finishPinch(){
+      pinchState=null;
+      clampViewportTranslate();
+      applyViewportTransform();
+    }
+
+    function registerTouch(ev){
+      if(ev.pointerType!=="touch") return;
+      touchPointers.set(ev.pointerId,{x:ev.clientX, y:ev.clientY});
+      if(touchPointers.size>=2){
+        if(activeMarker){
+          if(activePointerId!=null){
+            try{ activeMarker.releasePointerCapture?.(activePointerId); }catch(e){}
+          }
+          activeMarker.classList.remove("dragging");
+          activeMarker=null;
+          activePointerId=null;
+        }
+        resetPinchBaseline();
+      }
+    }
+
+    function updateTouch(ev){
+      if(ev.pointerType!=="touch") return;
+      if(!touchPointers.has(ev.pointerId)) return;
+      touchPointers.set(ev.pointerId,{x:ev.clientX, y:ev.clientY});
+      if(touchPointers.size>=2){
+        if(!pinchState) resetPinchBaseline();
+        updatePinch();
+        if(ev.cancelable) ev.preventDefault();
+      }
+    }
+
+    function unregisterTouch(ev){
+      if(ev.pointerType!=="touch") return;
+      touchPointers.delete(ev.pointerId);
+      if(touchPointers.size>=2){
+        resetPinchBaseline();
+      }else{
+        finishPinch();
+      }
+    }
+
+    viewport.addEventListener("pointerdown", registerTouch, true);
+    viewport.addEventListener("pointermove", updateTouch, {passive:false});
+    viewport.addEventListener("pointerup", unregisterTouch);
+    viewport.addEventListener("pointercancel", unregisterTouch);
+    viewport.addEventListener("pointerout", unregisterTouch);
+    viewport.addEventListener("pointerleave", unregisterTouch);
     const xy = m => (!m?null:{x:parseFloat(m.dataset.left||"0"), y:parseFloat(m.dataset.top||"0")});
 
     const emitState = (eventType, activeId=null)=>{
@@ -337,17 +487,14 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       markers.push(m);
 
       m.addEventListener("pointerdown",(ev)=>{
-        if(ev.pointerType==="touch"){
-          touchPointers.add(ev.pointerId);
-          if(touchPointers.size>=2){
-            return;
-          }
+        if(ev.pointerType==="touch" && touchPointers.size>=2){
+          return;
         }
         m.setPointerCapture?.(ev.pointerId);
         activePointerId = ev.pointerId;
-        const rect=stage.getBoundingClientRect();
+        const basePoint = clientToStage(ev.clientX, ev.clientY);
         const left=parseFloat(m.dataset.left||"0"), top=parseFloat(m.dataset.top||"0");
-        dragOffset={x:ev.clientX-(rect.left+left), y:ev.clientY-(rect.top+top)};
+        dragOffset={x:basePoint.x-left, y:basePoint.y-top};
         activeMarker=m;
         m.classList.add("dragging");
         emitState("marker_pointerdown", m.dataset.id);
@@ -356,6 +503,9 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       m.addEventListener("pointermove",(ev)=>{
         if(ev.pointerType==="touch" && touchPointers.size>=2){
           if(activeMarker===m){
+            if(activePointerId!=null){
+              try{ m.releasePointerCapture?.(activePointerId); }catch(e){}
+            }
             m.classList.remove("dragging");
             activeMarker=null;
             activePointerId=null;
@@ -363,8 +513,8 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           return;
         }
         if(activeMarker!==m) return;
-        const rect=stage.getBoundingClientRect();
-        setPosition(m, ev.clientX-rect.left-dragOffset.x, ev.clientY-rect.top-dragOffset.y);
+        const basePoint = clientToStage(ev.clientX, ev.clientY);
+        setPosition(m, basePoint.x-dragOffset.x, basePoint.y-dragOffset.y);
         updatePlanes();
         updateAngleStack();
         redrawPolygon();
@@ -377,9 +527,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         if(activePointerId!=null){
           try{ m.releasePointerCapture?.(activePointerId); }catch(e){}
         }
-        if(ev.pointerType==="touch"){
-          touchPointers.delete(ev.pointerId);
-        }
         activePointerId=null;
         m.classList.remove("dragging");
         activeMarker=null;
@@ -390,10 +537,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         emitState("marker_release", m.dataset.id);
       };
       m.addEventListener("pointerup", finish);
-      m.addEventListener("pointercancel", (ev)=>{
-        touchPointers.delete(ev.pointerId);
-        finish(ev);
-      });
+      m.addEventListener("pointercancel", finish);
     }
 
     function placeInitMarkersOnce(){
@@ -578,6 +722,13 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       const h=image.clientHeight||0;
       stage.style.width=w+"px";
       stage.style.height=h+"px";
+      if(!hasInitialLayout){
+        resetViewportTransform();
+        hasInitialLayout=true;
+      }else{
+        clampViewportTranslate();
+        applyViewportTransform();
+      }
       syncAngleStackScale();
       placeInitMarkersOnce();
       initPlanes();
@@ -588,12 +739,12 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       emitState("layout_update", null);
     }
 
-    window.addEventListener("pointerup", ()=>{
+    window.addEventListener("pointerup", (ev)=>{
+      if(ev.pointerType==="touch") unregisterTouch(ev);
       if(activeMarker){
         activeMarker.classList.remove("dragging");
         activeMarker=null;
         activePointerId=null;
-        touchPointers.clear();
         updatePlanes();
         updateAngleStack();
         redrawPolygon();
@@ -602,12 +753,12 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       }
     });
 
-    window.addEventListener("pointercancel", ()=>{
+    window.addEventListener("pointercancel", (ev)=>{
+      if(ev.pointerType==="touch") unregisterTouch(ev);
       if(activeMarker){
         activeMarker.classList.remove("dragging");
         activeMarker=null;
         activePointerId=null;
-        touchPointers.clear();
         updatePlanes();
         updateAngleStack();
         redrawPolygon();
@@ -617,12 +768,25 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
     });
 
     (payload.points||[]).forEach(pt=>createMarker(pt));
-    if (image.complete && image.naturalWidth){
+    const handleImageLoad=()=>{
+      pinchState=null;
+      touchPointers.clear();
+      hasInitialLayout=false;
       updateLayout();
+    };
+    if (image.complete && image.naturalWidth){
+      setTimeout(handleImageLoad, 0);
+    } else if (!image.complete) {
+      image.addEventListener("load", handleImageLoad, {once:true});
     } else {
-      image.addEventListener("load", updateLayout, {once:true});
+      // complete but naturalWidth reported as 0 (rare), force layout once and wait for next frame
+      requestAnimationFrame(()=>updateLayout());
     }
-    window.addEventListener("resize", updateLayout);
+    updateLayout();
+    window.addEventListener("resize", ()=>{
+      clampViewportTranslate();
+      updateLayout();
+    });
   })();
 </script>
     """
