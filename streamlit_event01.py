@@ -110,7 +110,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
   .std-hline{stroke:#ffffff;stroke-width:1.1;}
   .std-patient{stroke:#ef4444;stroke-width:2;fill:none;}
 
-  .ceph-marker{position:absolute;transform:translate(-50%,0);cursor:grab;touch-action:none;}
+  .ceph-marker{position:absolute;transform:translate(-50%,0);cursor:grab;}
   .ceph-marker.dragging{cursor:grabbing;}
   .ceph-marker .pin{width:0;height:0;margin:0 auto;}
   .ceph-label{margin-top:2px;font-size:11px;font-weight:700;color:#f8fafc;text-shadow:0 1px 2px rgba(0,0,0,.6);text-align:center;}
@@ -365,6 +365,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           return;
         }
         if(activeMarker!==m) return;
+        if(ev.pointerType==="touch" && ev.cancelable) ev.preventDefault();
         const rect=stage.getBoundingClientRect();
         setPosition(m, ev.clientX-rect.left-dragOffset.x, ev.clientY-rect.top-dragOffset.y);
         updatePlanes();
