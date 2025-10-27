@@ -1,21 +1,26 @@
-# CEF05_AllAngles.py
-"""CEF05: Show all cephalometric angles stacked on the left side."""
-import math
+"""CEF05: Extend CEF04 with a left-side angle stack (SNA, Facial)."""
 import json
+import math
 import streamlit as st
 import streamlit.components.v1 as components
 
 import CEF03 as base
 
-# 角度スタックの設定（上から順に表示される）
+# 画面左側に縦積みで表示する角度の定義
 ANGLE_STACK_CONFIG = [
-    ("Facial", "Facial", (("Pog", "N"), ("Po", "Or"))),
-    ("Convexity", "Convexity", (("N", "A"), ("A", "Pog"))),
-    ("SNA", "SNA", (("N", "A"), ("N", "S"))),
-    ("SNB", "SNB", (("N", "B"), ("N", "S"))),
-    ("ANB", "ANB", (("N", "A"), ("N", "B"))),
-    ("FMA", "FMA", (("Go", "Me"), ("Po", "Or"))),
-    ("Gonial", "Gonial", (("Ar", "Go"), ("Go", "Me"))),
+    {"id": "Facial", "label": "Facial", "type": "angle", "vectors": [["Pog", "N"], ["Po", "Or"]]},
+    {"id": "Convexity", "label": "Convexity", "type": "angle", "vectors": [["N", "A"], ["Pog", "A"]]},
+    {"id": "FH_mandiblar", "label": "FH mandiblar", "type": "angle", "vectors": [["Or", "Po"], ["Me", "Am"]]},
+    {"id": "Gonial_angle", "label": "Gonial angle", "type": "angle", "vectors": [["Ar", "Pm"], ["Me", "Am"]]},
+    {"id": "Ramus_angle", "label": "Ramus angle", "type": "angle", "vectors": [["Ar", "Pm"], ["N", "S"]]},
+    {"id": "SNP", "label": "SNP", "type": "angle", "vectors": [["N", "Pog"], ["N", "S"]]},
+    {"id": "SNA", "label": "SNA", "type": "angle", "vectors": [["N", "A"], ["N", "S"]]},
+    {"id": "SNB", "label": "SNB", "type": "angle", "vectors": [["N", "B"], ["N", "S"]]},
+    {"id": "SNA-SNB diff", "label": "SNA - SNB", "type": "difference", "minuend": "SNA", "subtrahend": "SNB"},
+    {"id": "Interincisal", "label": "Interincisal", "type": "angle", "vectors": [["U1", "U1r"], ["L1", "L1r"]]},
+    {"id": "U1 to FH plane", "label": "U1 - FH plane", "type": "angle", "vectors": [["U1", "U1r"], ["Po", "Or"]]},
+    {"id": "L1 to Mandibular", "label": "L1 - Mandibular", "type": "angle", "vectors": [["Me", "Am"], ["L1", "L1r"]]},
+    {"id": "L1_FH", "label": "L1 - FH", "type": "angle", "vectors": [["L1", "L1r"], ["Or", "Po"]]},
 ]
 
 
@@ -25,24 +30,22 @@ def render_ceph_component(
     show_labels: bool,
     point_state: dict,
 ) -> dict | None:
-    """CEF04ベースのドラッグ処理に、複数角度スタックを加える。"""
+    """CEF04ベースのドラッグ処理に、SNA/Facial の角度スタックを加える。"""
     payload_json = base.build_component_payload(
         image_data_url=image_data_url,
         marker_size=marker_size,
         show_labels=show_labels,
         point_state=point_state,
     )
-
-    # 左側縦積み角度リスト（Facialが最上段）
     angle_rows_html = "".join(
-        f'<div class="angle-row" data-angle="{angle_id}">'
-        f'<span class="angle-name">{label}</span>'
+        f'<div class="angle-row" data-angle="{cfg["id"]}">'
+        f'<span class="angle-name">{cfg["label"]}</span>'
         f'<span class="angle-value">--.-°</span>'
         "</div>"
-        for angle_id, label, _ in ANGLE_STACK_CONFIG
+        for cfg in ANGLE_STACK_CONFIG
     )
 
-    html = f"""
+    html = """
     <style>
       .ceph-wrapper {{
         position: relative;
@@ -55,6 +58,7 @@ def render_ceph_component(
         display: block;
         pointer-events: none;
         user-select: none;
+        -webkit-user-select: none;
       }}
       #ceph-planes {{
         position: absolute;
@@ -89,6 +93,7 @@ def render_ceph_component(
         font-weight: 600;
         color: #f8fafc;
         text-shadow: 0 1px 2px rgba(15, 23, 42, 0.8);
+        letter-spacing: 0.04em;
       }}
       #ceph-coords {{
         position: absolute;
@@ -102,7 +107,6 @@ def render_ceph_component(
         pointer-events: none;
         z-index: 3;
       }}
-      /* 左側の角度スタック */
       #angle-stack {{
         position: absolute;
         top: 56px;
@@ -117,7 +121,7 @@ def render_ceph_component(
         font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         pointer-events: none;
         z-index: 3;
-        min-width: 150px;
+        min-width: 120px;
       }}
       .angle-row {{
         display: flex;
@@ -131,30 +135,82 @@ def render_ceph_component(
       .angle-name {{
         font-size: 13px;
         font-weight: 600;
+        letter-spacing: 0.04em;
       }}
       .angle-value {{
         font-variant-numeric: tabular-nums;
         font-size: 13px;
         font-weight: 600;
       }}
+      /* --- minimal overlay (Facial mean ±1SD & 0点) --- */
+      #ceph-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        z-index: 2; /* above image, below angle stack */
+      }
+      #ceph-overlay .zero-dot { fill: #f43f5e; }
+      #ceph-overlay .mean-line { stroke: #e2e8f0; stroke-width: 2; }
+      #ceph-overlay .sd-line, #ceph-overlay .tick { stroke: #94a3b8; stroke-width: 1.5; shape-rendering: crispEdges; }
+      #ceph-overlay .label {
+        font: 11px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        fill: #e2e8f0;
+        paint-order: stroke;
+        stroke: rgba(15,23,42,0.6);
+        stroke-width: 2px;
+      }
     </style>
-
     <div class="ceph-wrapper">
-      <img id="ceph-image" src="{image_data_url}" alt="cephalometric background" />
+      <img id="ceph-image" src="__IMAGE_DATA_URL__" alt="cephalometric background" />
       <svg id="ceph-planes"></svg>
+      <svg id="ceph-overlay"></svg>
       <div id="ceph-stage"></div>
       <div id="ceph-coords">ポイントをドラッグして位置を調整できます。</div>
-      <div id="angle-stack">{angle_rows_html}</div>
+      <div id="angle-stack">__ANGLE_ROWS_HTML__</div>
     </div>
-
     <script>
-      const ANGLE_CONFIG = {json.dumps(ANGLE_STACK_CONFIG)};
-      const payload = {payload_json};
+      const ANGLE_CONFIG = __ANGLE_CONFIG_JSON__;
+      const payload = __PAYLOAD_JSON__;
 
       (function() {{
         const wrapper = document.querySelector(".ceph-wrapper");
         const image = document.getElementById("ceph-image");
         const stage = document.getElementById("ceph-stage");
+        // --- Minimal Facial polygon overlay ---
+        const overlaySvg = document.getElementById("ceph-overlay");
+        const drawFacialOverlay = function() {
+          if (!overlaySvg) { return; }
+          const img = document.getElementById("ceph-image");
+          const w = (img && img.clientWidth) ? img.clientWidth : ((overlaySvg && overlaySvg.clientWidth) ? overlaySvg.clientWidth : 800);
+          const h = (img && img.clientHeight) ? img.clientHeight : ((overlaySvg && overlaySvg.clientHeight) ? overlaySvg.clientHeight : 600);
+          overlaySvg.setAttribute("viewBox", "0 0 " + String(w) + " " + String(h));
+          overlaySvg.innerHTML = "";
+          var cx = Math.round(w * 0.5);
+          var y0 = Math.round(h * 0.12);
+          var measured = 84.34, mean = 83.1, sd = 2.5;
+          var px_per_deg = Math.max(4, Math.round(Math.min(w, h) * 0.008));
+          var dx_sd = sd * px_per_deg;
+          var dx_meas = (measured - mean) * px_per_deg;
+          var zero = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+          zero.setAttribute("cx", String(cx)); zero.setAttribute("cy", String(y0 - 16)); zero.setAttribute("r", "4"); zero.setAttribute("class", "zero-dot");
+          overlaySvg.appendChild(zero);
+          var meanLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+          meanLine.setAttribute("x1", String(cx)); meanLine.setAttribute("x2", String(cx)); meanLine.setAttribute("y1", String(y0 - 10)); meanLine.setAttribute("y2", String(y0 + 14)); meanLine.setAttribute("class", "mean-line");
+          overlaySvg.appendChild(meanLine);
+          var sdLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+          sdLine.setAttribute("x1", String(cx - dx_sd)); sdLine.setAttribute("x2", String(cx + dx_sd)); sdLine.setAttribute("y1", String(y0)); sdLine.setAttribute("y2", String(y0)); sdLine.setAttribute("class", "sd-line");
+          overlaySvg.appendChild(sdLine);
+          var tick = document.createElementNS("http://www.w3.org/2000/svg", "line");
+          tick.setAttribute("x1", String(cx + dx_meas)); tick.setAttribute("x2", String(cx + dx_meas)); tick.setAttribute("y1", String(y0 - 6)); tick.setAttribute("y2", String(y0 + 6)); tick.setAttribute("class", "tick");
+          overlaySvg.appendChild(tick);
+          var label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+          label.setAttribute("x", String(cx + dx_sd + 8)); label.setAttribute("y", String(y0 + 4)); label.setAttribute("class", "label");
+          label.textContent = "Facial  " + measured.toFixed(2) + "  （平均 " + mean.toFixed(1) + " ± " + sd.toFixed(1) + "）";
+          overlaySvg.appendChild(label);
+        };
         const planesSvg = document.getElementById("ceph-planes");
         const coords = document.getElementById("ceph-coords");
         const angleRows = Array.from(document.querySelectorAll("#angle-stack .angle-row"));
@@ -164,19 +220,28 @@ def render_ceph_component(
             {{ row, valueEl: row.querySelector(".angle-value") }},
           ])
         );
+        if (!wrapper || !image || !stage || !planesSvg) {{
+          return;
+        }}
 
         const showLabels = payload.showLabels !== false;
         const defaultSize = payload.markerSize || 28;
+        const frameId = window.frameElement ? window.frameElement.id : "streamlit-frame";
 
         const postMessage = (payload) => {{
-          if (!window.parent) return;
-          const frameId = window.frameElement ? window.frameElement.id : "streamlit-frame";
-          window.parent.postMessage({{
-            isStreamlitMessage: true,
-            id: frameId,
-            ...payload
-          }}, "*");
+          if (!window.parent) {{
+            return;
+          }}
+          window.parent.postMessage(
+            {{
+              isStreamlitMessage: true,
+              id: frameId,
+              ...payload,
+            }},
+            "*"
+          );
         }};
+
         const emitValue = (value) => {{
           postMessage({{
             type: "streamlit:setComponentValue",
@@ -184,125 +249,313 @@ def render_ceph_component(
           }});
         }};
 
-        const clamp = (v, min, max) => Math.min(Math.max(v, min), max);
+        const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
         const markers = [];
         const markerById = {{}};
-        const dragOffset = {{x:0, y:0}};
+        const dragOffset = {{ x: 0, y: 0 }};
         let activeMarker = null;
+
         const planeDefs = Array.isArray(payload.planes) ? payload.planes : [];
         const planeLines = [];
 
-        const xy = (marker) => marker ? {{
-          x: parseFloat(marker.dataset.left||"0"),
-          y: parseFloat(marker.dataset.top||"0")
-        }} : null;
+        const setPosition = (marker, left, top) => {{
+          const width = stage.clientWidth || 1;
+          const height = stage.clientHeight || 1;
+          const clampedLeft = clamp(left, 0, width);
+          const clampedTop = clamp(top, 0, height);
+          marker.style.left = `${{clampedLeft}}px`;
+          marker.style.top = `${{clampedTop}}px`;
+          marker.dataset.left = String(clampedLeft);
+          marker.dataset.top = String(clampedTop);
+          marker.dataset.ratioX = width ? clampedLeft / width : 0;
+          marker.dataset.ratioY = height ? clampedTop / height : 0;
+          updateMarkerLabel(marker);
+        }};
+
+        const setFromRatios = (marker) => {{
+          const width = stage.clientWidth || 1;
+          const height = stage.clientHeight || 1;
+          const ratioX = parseFloat(marker.dataset.ratioX || "0.5");
+          const ratioY = parseFloat(marker.dataset.ratioY || "0.5");
+          setPosition(marker, ratioX * width, ratioY * height);
+        }};
+
+        const emitState = (eventType, activeId) => {{
+          const width = Math.round(stage.clientWidth || 0);
+          const height = Math.round(stage.clientHeight || 0);
+          const points = markers.map((marker) => ({{
+            id: marker.dataset.id,
+            label: marker.dataset.label,
+            x_px: parseFloat(marker.dataset.left || "0"),
+            y_px: parseFloat(marker.dataset.top || "0"),
+            x_ratio: parseFloat(marker.dataset.ratioX || "0"),
+            y_ratio: parseFloat(marker.dataset.ratioY || "0"),
+          }}));
+          emitValue({{
+            event: eventType,
+            active_id: activeId || null,
+            stage: {{ width, height }},
+            points,
+          }});
+        }};
+
+        const updatePlanes = () => {{
+          if (!planesSvg) {{
+            return;
+          }}
+          const width = stage.clientWidth || 0;
+          const height = stage.clientHeight || 0;
+          planesSvg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
+          planesSvg.setAttribute("width", width);
+          planesSvg.setAttribute("height", height);
+          planeLines.forEach((entry) => {{
+            const plane = entry.plane;
+            const line = entry.line;
+            const startMarker = markerById[plane.start];
+            const endMarker = markerById[plane.end];
+            if (!startMarker || !endMarker) {{
+              line.style.opacity = 0;
+              return;
+            }}
+            line.style.opacity = 1;
+            line.setAttribute("x1", startMarker.dataset.left || "0");
+            line.setAttribute("y1", startMarker.dataset.top || "0");
+            line.setAttribute("x2", endMarker.dataset.left || "0");
+            line.setAttribute("y2", endMarker.dataset.top || "0");
+          }});
+        }};
+
+        const updateMarkerLabel = (marker) => {{
+          if (!showLabels) {{
+            return;
+          }}
+          const labelEl = marker.querySelector(".label");
+          if (!labelEl) {{
+            return;
+          }}
+          const baseLabel = marker.dataset.baseLabel || marker.dataset.id || "";
+          const x = Math.round(parseFloat(marker.dataset.left || "0"));
+          const y = Math.round(parseFloat(marker.dataset.top || "0"));
+          labelEl.textContent = `${{baseLabel}} (${{x}}, ${{y}})`;
+        }};
+
+        const xy = (marker) => {{
+          if (!marker) {{
+            return null;
+          }}
+          return {{
+            x: parseFloat(marker.dataset.left || "0"),
+            y: parseFloat(marker.dataset.top || "0"),
+          }};
+        }};
 
         const computeAngleDeg = (pairA, pairB) => {{
-          const a1=markerById[pairA[0]], a2=markerById[pairA[1]];
-          const b1=markerById[pairB[0]], b2=markerById[pairB[1]];
-          if(!a1||!a2||!b1||!b2) return null;
-          const A1=xy(a1), A2=xy(a2), B1=xy(b1), B2=xy(b2);
-          const vA={{x:A1.x-A2.x,y:A1.y-A2.y}}, vB={{x:B1.x-B2.x,y:B1.y-B2.y}};
-          const denom=Math.hypot(vA.x,vA.y)*Math.hypot(vB.x,vB.y);
-          if(!denom) return null;
-          const dot=vA.x*vB.x+vA.y*vB.y;
-          const ratio=Math.min(1,Math.max(-1,dot/denom));
-          return (Math.acos(ratio)*180)/Math.PI;
+          const a1 = markerById[pairA[0]];
+          const a2 = markerById[pairA[1]];
+          const b1 = markerById[pairB[0]];
+          const b2 = markerById[pairB[1]];
+          if (!a1 || !a2 || !b1 || !b2) {{
+            return null;
+          }}
+          const A1 = xy(a1);
+          const A2 = xy(a2);
+          const B1 = xy(b1);
+          const B2 = xy(b2);
+          const vecA = {{ x: A1.x - A2.x, y: A1.y - A2.y }};
+          const vecB = {{ x: B1.x - B2.x, y: B1.y - B2.y }};
+          const denom = Math.hypot(vecA.x, vecA.y) * Math.hypot(vecB.x, vecB.y);
+          if (!denom) {{
+            return null;
+          }}
+          const dot = vecA.x * vecB.x + vecA.y * vecB.y;
+          const ratio = Math.min(1, Math.max(-1, dot / denom));
+          return (Math.acos(ratio) * 180) / Math.PI;
         }};
 
         const updateAngleStack = () => {{
-          ANGLE_CONFIG.forEach(([id,label,pairs]) => {{
-            const entry=angleRowMap[id];
-            if(!entry) return;
-            const ang=computeAngleDeg(pairs[0],pairs[1]);
-            if(ang===null||Number.isNaN(ang)){{
+          const angleValues = new Map();
+          ANGLE_CONFIG.forEach((config) => {{
+            const entry = angleRowMap[config.id];
+            if (!entry) {{
+              return;
+            }}
+            let value = null;
+            if (config.type === "angle") {{
+              value = computeAngleDeg(config.vectors[0], config.vectors[1]);
+            }} else if (config.type === "difference") {{
+              const minuend = angleValues.get(config.minuend);
+              const subtrahend = angleValues.get(config.subtrahend);
+              if (minuend != null && !Number.isNaN(minuend) && subtrahend != null && !Number.isNaN(subtrahend)) {{
+                value = minuend - subtrahend;
+              }}
+            }}
+            if (value === null || Number.isNaN(value)) {{
               entry.row.classList.add("dimmed");
-              entry.valueEl.textContent="--.-°";
+              entry.valueEl.textContent = "--.-°";
             }} else {{
               entry.row.classList.remove("dimmed");
-              entry.valueEl.textContent=`${{ang.toFixed(1)}}°`;
+              entry.valueEl.textContent = `${{value.toFixed(1)}}°`;
             }}
+            angleValues.set(config.id, value);
           }});
         }};
 
-        const setPosition=(m,l,t)=>{{
-          const w=stage.clientWidth||1,h=stage.clientHeight||1;
-          const L=clamp(l,0,w),T=clamp(t,0,h);
-          m.style.left=`${{L}}px`;m.style.top=`${{T}}px`;
-          m.dataset.left=L;m.dataset.top=T;
-          m.dataset.ratioX=w?L/w:0;m.dataset.ratioY=h?T/h:0;
-        }};
-        const setFromRatios=(m)=>{{
-          const w=stage.clientWidth||1,h=stage.clientHeight||1;
-          const rx=parseFloat(m.dataset.ratioX||"0.5"),ry=parseFloat(m.dataset.ratioY||"0.5");
-          setPosition(m,rx*w,ry*h);
-        }};
-        const emitState=(type,activeId)=>{{
-          const pts=markers.map(m=>({{
-            id:m.dataset.id,
-            x_ratio:parseFloat(m.dataset.ratioX||"0"),
-            y_ratio:parseFloat(m.dataset.ratioY||"0"),
-          }}));
-          emitValue({{event:type,active_id:activeId||null,points:pts}});
-        }};
+        const createMarker = (pt) => {{
+          const marker = document.createElement("div");
+          marker.className = "ceph-marker";
+          marker.dataset.id = pt.id;
+          marker.dataset.label = pt.label || pt.id;
+          marker.dataset.baseLabel = pt.label || pt.id;
+          marker.dataset.ratioX = typeof pt.ratio_x === "number" ? pt.ratio_x : 0.5;
+          marker.dataset.ratioY = typeof pt.ratio_y === "number" ? pt.ratio_y : 0.5;
+          marker.dataset.size = pt.size || defaultSize;
 
-        const createMarker=(pt)=>{{
-          const m=document.createElement("div");
-          m.className="ceph-marker";
-          m.dataset.id=pt.id;m.dataset.label=pt.label||pt.id;
-          m.dataset.ratioX=pt.ratio_x||0.5;m.dataset.ratioY=pt.ratio_y||0.5;
-          const pin=document.createElement("div");
-          pin.className="pin";
-          const s=pt.size||defaultSize;
-          pin.style.borderLeft=`${{s/2}}px solid transparent`;
-          pin.style.borderRight=`${{s/2}}px solid transparent`;
-          pin.style.borderBottom=`${{s}}px solid ${{pt.color||"#f97316"}}`;
-          m.appendChild(pin);
-          if(showLabels){{
-            const lbl=document.createElement("div");
-            lbl.className="label";lbl.textContent=pt.id;
-            m.appendChild(lbl);
+          const pin = document.createElement("div");
+          pin.className = "pin";
+          const size = parseFloat(marker.dataset.size || defaultSize);
+          pin.style.borderLeft = `${{size / 2}}px solid transparent`;
+          pin.style.borderRight = `${{size / 2}}px solid transparent`;
+          pin.style.borderBottom = `${{size}}px solid ${{pt.color || "#f97316"}}`;
+          marker.appendChild(pin);
+
+          if (showLabels) {{
+            const label = document.createElement("div");
+            label.className = "label";
+            marker.appendChild(label);
           }}
-          stage.appendChild(m);
-          markers.push(m);markerById[pt.id]=m;
 
-          m.addEventListener("pointerdown",(e)=>{{
-            const rect=stage.getBoundingClientRect();
-            dragOffset.x=e.clientX-(rect.left+parseFloat(m.dataset.left||"0"));
-            dragOffset.y=e.clientY-(rect.top+parseFloat(m.dataset.top||"0"));
-            activeMarker=m;m.classList.add("dragging");
-            e.preventDefault();
+          stage.appendChild(marker);
+          markers.push(marker);
+          markerById[pt.id] = marker;
+
+          marker.addEventListener("pointerdown", (event) => {{
+            const stageRect = stage.getBoundingClientRect();
+            const left = parseFloat(marker.dataset.left || "0");
+            const top = parseFloat(marker.dataset.top || "0");
+            dragOffset.x = event.clientX - (stageRect.left + left);
+            dragOffset.y = event.clientY - (stageRect.top + top);
+            activeMarker = marker;
+            marker.classList.add("dragging");
+            emitState("pointerdown", marker.dataset.id);
+            event.preventDefault();
           }});
-          m.addEventListener("pointermove",(e)=>{{
-            if(activeMarker!==m) return;
-            const rect=stage.getBoundingClientRect();
-            const L=e.clientX-rect.left-dragOffset.x;
-            const T=e.clientY-rect.top-dragOffset.y;
-            setPosition(m,L,T);
+
+          marker.addEventListener("pointermove", (event) => {{
+            if (activeMarker !== marker) {{
+              return;
+            }}
+            const stageRect = stage.getBoundingClientRect();
+            const newLeft = event.clientX - stageRect.left - dragOffset.x;
+            const newTop = event.clientY - stageRect.top - dragOffset.y;
+            setPosition(marker, newLeft, newTop);
+            updatePlanes();
             updateAngleStack();
+            emitState("pointermove", marker.dataset.id);
           }});
-          m.addEventListener("pointerup",()=>{{activeMarker=null;m.classList.remove("dragging");updateAngleStack();}});
-          m.addEventListener("pointercancel",()=>{{activeMarker=null;m.classList.remove("dragging");updateAngleStack();}});
+
+          const finish = (eventType) => {{
+            if (activeMarker !== marker) {{
+              return;
+            }}
+            marker.classList.remove("dragging");
+            activeMarker = null;
+            updateAngleStack();
+            emitState(eventType, marker.dataset.id);
+            updatePlanes();
+          }};
+
+          marker.addEventListener("pointerup", () => finish("pointerup"));
+          marker.addEventListener("pointercancel", () => finish("pointercancel"));
+
+          return marker;
         }};
 
-        const init=()=>{{
-          payload.points.forEach(pt=>createMarker(pt));
-          markers.forEach(m=>setFromRatios(m));
+        const initPlanes = () => {{
+          planesSvg.innerHTML = "";
+          planeLines.length = 0;
+          planeDefs.forEach((plane) => {{
+            const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+            line.setAttribute("stroke", plane.color || "#f97316");
+            line.setAttribute("stroke-width", String(plane.width || 2));
+            if (plane.dash) {{
+              line.setAttribute("stroke-dasharray", plane.dash);
+            }}
+            planesSvg.appendChild(line);
+            planeLines.push({{ plane, line }});
+          }});
+        }};
+
+        const updateLayout = () => {{
+          const width = image.clientWidth;
+          const height = image.clientHeight;
+          stage.style.width = `${{width}}px`;
+          stage.style.height = `${{height}}px`;
+          initPlanes();
+          markers.forEach((marker) => setFromRatios(marker));
+          updatePlanes();
           updateAngleStack();
+          coords.textContent = `ステージサイズ: ${{width}} × ${{height}}`;
         }};
-        const ensureReady=()=>{{
-          if(image.complete&&image.naturalWidth) init();
-          else image.addEventListener("load",init,{{once:true}});
+
+        payload.points.forEach((pt) => createMarker(pt));
+        initPlanes();
+        updatePlanes();
+        updateAngleStack();
+        coords.textContent = "ポイントをドラッグして位置調整";
+
+        window.addEventListener("pointerup", () => {{
+          if (activeMarker) {{
+            activeMarker.classList.remove("dragging");
+            activeMarker = null;
+            updateAngleStack();
+            emitState("pointerup", null);
+          }}
+        }});
+        window.addEventListener("pointercancel", () => {{
+          if (activeMarker) {{
+            activeMarker.classList.remove("dragging");
+            activeMarker = null;
+            updateAngleStack();
+            emitState("pointercancel", null);
+          }}
+        }});
+        window.addEventListener("resize", () => {
+          drawFacialOverlay();{
+          updateLayout();
+        drawFacialOverlay();
+          coords.textContent = "レイアウトを再調整しました。";
+        }});
+
+        const ensureReady = () => {{
+          if (image.complete && image.naturalWidth) {{
+            updateLayout();
+        drawFacialOverlay();
+            updateAngleStack();
+          }} else {{
+            image.addEventListener("load", () => {{
+              updateLayout();
+        drawFacialOverlay();
+              updateAngleStack();
+            }}, {{ once: true }});
+          }}
         }};
+
         ensureReady();
+        emitState("init", null);
       }})();
     </script>
     """
-    return components.html(html, height=850, scrolling=False)
+    
+    # --- substitute tokens safely (no f-strings / no .format on HTML) ---
+    html = html.replace("__IMAGE_DATA_URL__", image_data_url)
+    html = html.replace("__PAYLOAD_JSON__", payload_json)
+    html = html.replace("__ANGLE_ROWS_HTML__", angle_rows_html)
+    html = html.replace("__ANGLE_CONFIG_JSON__", json.dumps(ANGLE_STACK_CONFIG))
+return components.html(html, height=1100, scrolling=False)
 
 
-def main():
-    """CEF03ベースワークフローを再利用して多角度スタックを有効化。"""
+def main() -> None:
+    """CEF03 のワークフローを再利用して角度スタックを有効化する。"""
     base.render_ceph_component = render_ceph_component
     base.main()
 
