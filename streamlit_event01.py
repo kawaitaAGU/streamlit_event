@@ -1,12 +1,23 @@
-"""CEF05: Extend CEF04 with a left-side angle stack (SNA, Facial)."""
+# CEF52.py
+"""
+iPhone でページ全体のピンチズームを有効にしつつ、
+従来の CEF46 ベースの描画・ドラッグ機能を維持したバージョン。
+"""
+
 import json
-import math
 import streamlit as st
 import streamlit.components.v1 as components
-
 import CEF03 as base
 
-# 画面左側に縦積みで表示する角度の定義
+SD_BASE = 4.0
+POLY_WIDTH_SCALE = 2.0
+ANGLE_STACK_BASE_WIDTH = 900
+DEFAULT_PLACEHOLDER_DATA_URL = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMA"
+    "ASsJTYQAAAAASUVORK5CYII="
+)
+
 ANGLE_STACK_CONFIG = [
     {"id": "Facial", "label": "Facial", "type": "angle", "vectors": [["Pog", "N"], ["Po", "Or"]]},
     {"id": "Convexity", "label": "Convexity", "type": "angle", "vectors": [["N", "A"], ["Pog", "A"]]},
@@ -23,541 +34,670 @@ ANGLE_STACK_CONFIG = [
     {"id": "L1_FH", "label": "L1 - FH", "type": "angle", "vectors": [["L1", "L1r"], ["Or", "Po"]]},
 ]
 
+POLYGON_ROWS = [
+    ["VTOP", 0.0, 0.0, 0.0],
+    ["00", 0.0, 0.0, 0.0],
+    ["Facial", 83.1, 2.5, 0.1036],
+    ["Convexity", 11.3, 4.6, 0.1607],
+    ["FH_mandiblar", 32.0, 2.4, 0.0893],
+    ["Gonial_angle", 129.2, 4.7, 0.1786],
+    ["Ramus_angle", 89.7, 3.7, 0.1429],
+    ["SNP", 76.1, 2.8, 0.1250],
+    ["SNA", 80.9, 3.1, 0.1250],
+    ["SNB", 76.2, 2.8, 0.1286],
+    ["SNA-SNB diff", 4.7, 1.8, 0.0714],
+    ["01", 0.0, 0.0, 0.0],
+    ["Interincisal", 124.3, 6.9, 0.2500],
+    ["U1 to FH plane", 109.8, 5.3, 0.1679],
+    ["L1 to Mandibular", 93.8, 5.9, 0.2107],
+    ["L1_FH", 57.2, 3.9, 0.2500],
+    ["ZZ", 0.0, 0.0, 0.0],
+    ["VBOT", 0.0, 0.0, 0.0],
+]
 
-def render_ceph_component(
-    image_data_url: str,
-    marker_size: int,
-    show_labels: bool,
-    point_state: dict,
-) -> dict | None:
-    """CEF04ベースのドラッグ処理に、SNA/Facial の角度スタックを加える。"""
+
+def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bool, point_state: dict):
     payload_json = base.build_component_payload(
         image_data_url=image_data_url,
         marker_size=marker_size,
         show_labels=show_labels,
         point_state=point_state,
     )
+
     angle_rows_html = "".join(
         f'<div class="angle-row" data-angle="{cfg["id"]}">'
-        f'<span class="angle-name">{cfg["label"]}</span>'
-        f'<span class="angle-value">--.-°</span>'
-        "</div>"
+        f'  <span class="angle-name">{cfg["label"]}</span>'
+        f'  <span class="angle-value">--.-°</span>'
+        f'</div>'
         for cfg in ANGLE_STACK_CONFIG
     )
 
     html = """
-    <style>
-      .ceph-wrapper {{
-        position: relative;
-        width: min(100%, 960px);
-        margin: 0 auto;
-      }}
-      .ceph-wrapper img {{
-        width: 100%;
-        height: auto;
-        display: block;
-        pointer-events: none;
-        user-select: none;
-        -webkit-user-select: none;
-      }}
-      #ceph-planes {{
-        position: absolute;
-        inset: 0;
-        pointer-events: none;
-      }}
-      #ceph-stage {{
-        position: absolute;
-        inset: 0;
-        pointer-events: none;
-      }}
-      .ceph-marker {{
-        position: absolute;
-        transform: translate(-50%, 0);
-        cursor: grab;
-        pointer-events: auto;
-        touch-action: none;
-        text-align: center;
-        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }}
-      .ceph-marker.dragging {{
-        cursor: grabbing;
-      }}
-      .ceph-marker .pin {{
-        width: 0;
-        height: 0;
-        margin: 0 auto;
-      }}
-      .ceph-marker .label {{
-        margin-top: 4px;
-        font-size: 12px;
-        font-weight: 600;
-        color: #f8fafc;
-        text-shadow: 0 1px 2px rgba(15, 23, 42, 0.8);
-        letter-spacing: 0.04em;
-      }}
-      #ceph-coords {{
-        position: absolute;
-        top: 12px;
-        left: 12px;
-        background: rgba(15, 23, 42, 0.68);
-        color: #e2e8f0;
-        padding: 6px 10px;
-        border-radius: 6px;
-        font: 12px/1.4 monospace;
-        pointer-events: none;
-        z-index: 3;
-      }}
-      #angle-stack {{
-        position: absolute;
-        top: 56px;
-        left: 12px;
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-        padding: 10px 12px;
-        border-radius: 8px;
-        background: rgba(15, 23, 42, 0.78);
-        color: #f8fafc;
-        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        pointer-events: none;
-        z-index: 3;
-        min-width: 120px;
-      }}
-      .angle-row {{
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 8px;
-      }}
-      .angle-row.dimmed {{
-        opacity: 0.45;
-      }}
-      .angle-name {{
-        font-size: 13px;
-        font-weight: 600;
-        letter-spacing: 0.04em;
-      }}
-      .angle-value {{
-        font-variant-numeric: tabular-nums;
-        font-size: 13px;
-        font-weight: 600;
-      }}
-      /* --- minimal overlay (Facial mean ±1SD & 0点) --- */
-      #ceph-overlay {
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        pointer-events: none;
-        z-index: 2; /* above image, below angle stack */
-      }
-      #ceph-overlay .zero-dot { fill: #f43f5e; }
-      #ceph-overlay .mean-line { stroke: #e2e8f0; stroke-width: 2; }
-      #ceph-overlay .sd-line, #ceph-overlay .tick { stroke: #94a3b8; stroke-width: 1.5; shape-rendering: crispEdges; }
-      #ceph-overlay .label {
-        font: 11px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-        fill: #e2e8f0;
-        paint-order: stroke;
-        stroke: rgba(15,23,42,0.6);
-        stroke-width: 2px;
-      }
-    </style>
-    <div class="ceph-wrapper">
-      <img id="ceph-image" src="__IMAGE_DATA_URL__" alt="cephalometric background" />
-      <svg id="ceph-planes"></svg>
-      <svg id="ceph-overlay"></svg>
-      <div id="ceph-stage"></div>
-      <div id="ceph-coords">ポイントをドラッグして位置を調整できます。</div>
-      <div id="angle-stack">__ANGLE_ROWS_HTML__</div>
-    </div>
-    <script>
-      const ANGLE_CONFIG = __ANGLE_CONFIG_JSON__;
-      const payload = __PAYLOAD_JSON__;
+<style>
+  :where(body){margin:0;}
+  .ceph-wrapper{position:relative;width:min(100%,960px);margin:0 auto;}
+  #ceph-image{width:100%;height:auto;display:block;pointer-events:none;user-select:none;-webkit-user-select:none;}
+  #ceph-planes{position:absolute;inset:0;pointer-events:none;z-index:1;}
+  #ceph-overlay{position:absolute;inset:0;pointer-events:none;z-index:2;}
+  #ceph-stage{
+    position:absolute;
+    inset:0;
+    pointer-events:auto;
+    z-index:3;
+    touch-action:auto;
+    -webkit-user-select:none;
+    user-select:none;
+  }
+  #angle-stack{
+    position:absolute;top:56px;left:12px;
+    display:flex;flex-direction:column;gap:8px;
+    padding:10px 12px;border-radius:10px;
+    background:rgba(15,23,42,.78);color:#f8fafc;
+    font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    pointer-events:none;z-index:4;min-width:140px;
+    transform-origin:top left;transform:scale(1);
+  }
+  .angle-row{display:flex;justify-content:space-between;align-items:center;padding:2px 0;}
+  .angle-row.dimmed{opacity:.45;}
+  .angle-name,.angle-value{font-size:13px;font-weight:600;}
 
-      (function() {{
-        const wrapper = document.querySelector(".ceph-wrapper");
-        const image = document.getElementById("ceph-image");
-        const stage = document.getElementById("ceph-stage");
-        // --- Minimal Facial polygon overlay ---
-        const overlaySvg = document.getElementById("ceph-overlay");
-        const drawFacialOverlay = function() {
-          if (!overlaySvg) { return; }
-          const img = document.getElementById("ceph-image");
-          const w = (img && img.clientWidth) ? img.clientWidth : ((overlaySvg && overlaySvg.clientWidth) ? overlaySvg.clientWidth : 800);
-          const h = (img && img.clientHeight) ? img.clientHeight : ((overlaySvg && overlaySvg.clientHeight) ? overlaySvg.clientHeight : 600);
-          overlaySvg.setAttribute("viewBox", "0 0 " + String(w) + " " + String(h));
-          overlaySvg.innerHTML = "";
-          var cx = Math.round(w * 0.5);
-          var y0 = Math.round(h * 0.12);
-          var measured = 84.34, mean = 83.1, sd = 2.5;
-          var px_per_deg = Math.max(4, Math.round(Math.min(w, h) * 0.008));
-          var dx_sd = sd * px_per_deg;
-          var dx_meas = (measured - mean) * px_per_deg;
-          var zero = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-          zero.setAttribute("cx", String(cx)); zero.setAttribute("cy", String(y0 - 16)); zero.setAttribute("r", "4"); zero.setAttribute("class", "zero-dot");
-          overlaySvg.appendChild(zero);
-          var meanLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
-          meanLine.setAttribute("x1", String(cx)); meanLine.setAttribute("x2", String(cx)); meanLine.setAttribute("y1", String(y0 - 10)); meanLine.setAttribute("y2", String(y0 + 14)); meanLine.setAttribute("class", "mean-line");
-          overlaySvg.appendChild(meanLine);
-          var sdLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
-          sdLine.setAttribute("x1", String(cx - dx_sd)); sdLine.setAttribute("x2", String(cx + dx_sd)); sdLine.setAttribute("y1", String(y0)); sdLine.setAttribute("y2", String(y0)); sdLine.setAttribute("class", "sd-line");
-          overlaySvg.appendChild(sdLine);
-          var tick = document.createElementNS("http://www.w3.org/2000/svg", "line");
-          tick.setAttribute("x1", String(cx + dx_meas)); tick.setAttribute("x2", String(cx + dx_meas)); tick.setAttribute("y1", String(y0 - 6)); tick.setAttribute("y2", String(y0 + 6)); tick.setAttribute("class", "tick");
-          overlaySvg.appendChild(tick);
-          var label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-          label.setAttribute("x", String(cx + dx_sd + 8)); label.setAttribute("y", String(y0 + 4)); label.setAttribute("class", "label");
-          label.textContent = "Facial  " + measured.toFixed(2) + "  （平均 " + mean.toFixed(1) + " ± " + sd.toFixed(1) + "）";
-          overlaySvg.appendChild(label);
-        };
-        const planesSvg = document.getElementById("ceph-planes");
-        const coords = document.getElementById("ceph-coords");
-        const angleRows = Array.from(document.querySelectorAll("#angle-stack .angle-row"));
-        const angleRowMap = Object.fromEntries(
-          angleRows.map((row) => [
-            row.dataset.angle,
-            {{ row, valueEl: row.querySelector(".angle-value") }},
-          ])
-        );
-        if (!wrapper || !image || !stage || !planesSvg) {{
+  #coord-stack{margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,.18);
+               font-size:11px;line-height:1.25;max-height:200px;overflow:auto;white-space:nowrap;}
+  #coord-stack .coord-item{display:flex;justify-content:space-between;gap:10px;opacity:.9;}
+
+  #std-poly-outline{fill:none;stroke:#ffffff;stroke-width:1.6;stroke-opacity:.95;}
+  .std-centerline{stroke:#facc15;stroke-width:2;}
+  .std-hline{stroke:#ffffff;stroke-width:1.1;}
+  .std-patient{stroke:#ef4444;stroke-width:2;fill:none;}
+
+  .ceph-marker{position:absolute;transform:translate(-50%,0);cursor:grab;}
+  .ceph-marker.dragging{cursor:grabbing;}
+  .ceph-marker .pin{width:0;height:0;margin:0 auto;}
+  .ceph-label{margin-top:2px;font-size:11px;font-weight:700;color:#f8fafc;text-shadow:0 1px 2px rgba(0,0,0,.6);text-align:center;}
+</style>
+
+<div class="ceph-wrapper">
+  <img id="ceph-image" src="__IMAGE_DATA_URL__" alt="cephalometric background"/>
+  <svg id="ceph-planes"></svg>
+  <svg id="ceph-overlay"></svg>
+  <div id="ceph-stage"></div>
+  <div id="angle-stack">
+    __ANGLE_ROWS_HTML__
+    <div id="coord-stack"></div>
+  </div>
+</div>
+
+<script>
+  (function ensureViewport(){
+    let m=document.querySelector('meta[name="viewport"]');
+    if(!m){
+      m=document.createElement('meta');
+      m.name='viewport';
+      document.head.appendChild(m);
+    }
+    m.setAttribute('content','width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=8, user-scalable=yes');
+  })();
+
+  const ANGLE_CONFIG = __ANGLE_CONFIG_JSON__;
+  const POLYGON_ROWS = __POLY_ROWS_JSON__;
+  const SD_BASE = __SD_BASE__;
+  const POLY_WIDTH_SCALE = __POLY_WIDTH_SCALE__;
+  const ANGLE_STACK_BASE_WIDTH = __ANGLE_STACK_BASE_WIDTH__;
+  const payload = __PAYLOAD_JSON__;
+
+  (function(){
+    const wrapper = document.querySelector(".ceph-wrapper");
+    const image   = document.getElementById("ceph-image");
+    const stage   = document.getElementById("ceph-stage");
+    const planesSvg = document.getElementById("ceph-planes");
+    const overlaySvg= document.getElementById("ceph-overlay");
+    const angleStack= document.getElementById("angle-stack");
+    const coordStack= document.getElementById("coord-stack");
+
+    if(!wrapper || !image || !stage || !planesSvg || !angleStack || !coordStack){
+      return;
+    }
+
+    const frameId = window.frameElement ? window.frameElement.id : "streamlit-frame";
+    const postToStreamlit = (payload)=>{
+      if(!window.parent) return;
+      window.parent.postMessage({isStreamlitMessage:true,id:frameId,...payload},"*");
+    };
+    const emitValue = (value)=>postToStreamlit({type:"streamlit:setComponentValue",value});
+
+    const angleRows = Array.from(document.querySelectorAll("#angle-stack .angle-row"));
+    const angleRowMap = Object.fromEntries(angleRows.map(row => [row.dataset.angle, {row, valueEl:row.querySelector(".angle-value")}] ));
+
+    const markers=[], markerById={}, planeDefs=(payload.planes||[]), planeLines=[];
+    const activeTouches = new Set();
+    const globalTouches = new Set();
+    let stagePointerDisabled = false;
+    let activeMarker=null;
+    let dragOffset={x:0,y:0};
+    let activePointerId=null;
+
+    const clamp=(v,lo,hi)=>Math.min(Math.max(v,lo),hi);
+    const xy = m => (!m?null:{x:parseFloat(m.dataset.left||"0"), y:parseFloat(m.dataset.top||"0")});
+
+    const emitState = (eventType, activeId=null)=>{
+      const width = Math.round(stage.clientWidth || 0);
+      const height = Math.round(stage.clientHeight || 0);
+      const points = markers.map(marker=>({
+        id: marker.dataset.id,
+        label: marker.dataset.label || marker.dataset.id,
+        x_px: parseFloat(marker.dataset.left || "0"),
+        y_px: parseFloat(marker.dataset.top || "0"),
+        x_ratio: parseFloat(marker.dataset.ratioX || "0"),
+        y_ratio: parseFloat(marker.dataset.ratioY || "0"),
+      }));
+      emitValue({
+        event: eventType,
+        active_id: activeId,
+        stage: {width, height},
+        points,
+      });
+    };
+
+    function syncAngleStackScale(){
+      const base = ANGLE_STACK_BASE_WIDTH || 900;
+      const w = image.clientWidth || base;
+      const scale = Math.min(1, w / base);
+      angleStack.style.transform = 'scale(' + scale + ')';
+    }
+
+    const computeAngle=(pairA,pairB)=>{
+      const a1=markerById[pairA[0]], a2=markerById[pairA[1]], b1=markerById[pairB[0]], b2=markerById[pairB[1]];
+      if(!a1||!a2||!b1||!b2) return null;
+      const A1=xy(a1),A2=xy(a2),B1=xy(b1),B2=xy(b2);
+      const vAx=A1.x-A2.x, vAy=A1.y-A2.y, vBx=B1.x-B2.x, vBy=B1.y-B2.y;
+      const lenA=Math.hypot(vAx,vAy), lenB=Math.hypot(vBx,vBy);
+      if(lenA<1e-6||lenB<1e-6) return null;
+      let r=(vAx*vBx+vAy*vBy)/(lenA*lenB);
+      r=Math.min(1,Math.max(-1,r));
+      return Math.acos(r)*180/Math.PI;
+    };
+
+    const angleCurrent=new Map();
+    function updateAngleStack(){
+      const cache=new Map();
+      ANGLE_CONFIG.forEach(cfg=>{
+        const entry=angleRowMap[cfg.id]; if(!entry) return;
+        let v=null;
+        if(cfg.type==="angle"){ v=computeAngle(cfg.vectors[0], cfg.vectors[1]); }
+        else if(cfg.type==="difference"){
+          const a=cache.get(cfg.minuend), b=cache.get(cfg.subtrahend);
+          if(a!=null && b!=null) v=a-b;
+        }
+        if(cfg.id==="Convexity" && v!=null) v=180-v;
+        if(v==null || Number.isNaN(v)){
+          entry.row.classList.add("dimmed");
+          entry.valueEl.textContent="--.-°";
+          angleCurrent.set(cfg.id,null);
+        }else{
+          entry.row.classList.remove("dimmed");
+          entry.valueEl.textContent=v.toFixed(1)+"°";
+          angleCurrent.set(cfg.id,v);
+        }
+        cache.set(cfg.id,v);
+      });
+    }
+
+    function updateCoordStack(){
+      const ids = Object.keys(markerById).sort();
+      coordStack.innerHTML = ids.map(id=>{
+        const m = markerById[id]; if(!m) return "";
+        const x = Math.round(parseFloat(m.dataset.left||"0"));
+        const y = Math.round(parseFloat(m.dataset.top||"0"));
+        return `<div class="coord-item"><span>${id}</span><span>(${x}, ${y})</span></div>`;
+      }).join("");
+    }
+
+    function setPosition(m,left,top){
+      const w=stage.clientWidth||1;
+      const h=stage.clientHeight||1;
+      const cl=Math.round(clamp(left,0,w));
+      const ct=Math.round(clamp(top,0,h));
+      m.style.left=cl+"px";
+      m.style.top=ct+"px";
+      m.dataset.left=cl;
+      m.dataset.top=ct;
+      m.dataset.ratioX = w ? (cl / w) : 0;
+      m.dataset.ratioY = h ? (ct / h) : 0;
+    }
+
+    const updateStagePointerState = ()=>{
+      if(globalTouches.size>=2){
+        if(!stagePointerDisabled){
+          stage.style.pointerEvents='none';
+          wrapper.style.pointerEvents='none';
+          stagePointerDisabled=true;
+        }
+      }else if(stagePointerDisabled){
+        stage.style.pointerEvents='auto';
+        wrapper.style.pointerEvents='auto';
+        stagePointerDisabled=false;
+      }
+    };
+
+    window.addEventListener("pointerdown",(ev)=>{
+      if(ev.pointerType==="touch"){
+        globalTouches.add(ev.pointerId);
+        updateStagePointerState();
+      }
+    }, true);
+    window.addEventListener("pointerup",(ev)=>{
+      if(ev.pointerType==="touch"){
+        globalTouches.delete(ev.pointerId);
+        updateStagePointerState();
+      }
+    }, true);
+    window.addEventListener("pointercancel",(ev)=>{
+      if(ev.pointerType==="touch"){
+        globalTouches.delete(ev.pointerId);
+        updateStagePointerState();
+      }
+    }, true);
+
+    function createMarker(pt){
+      const m=document.createElement("div");
+      m.className="ceph-marker";
+      m.dataset.id=pt.id;
+      m.dataset.label=pt.label||pt.id||"";
+      const s=pt.size||28;
+
+      const pin=document.createElement("div");
+      pin.className="pin";
+      pin.style.borderLeft=(s/4)+"px solid transparent";
+      pin.style.borderRight=(s/4)+"px solid transparent";
+      pin.style.borderBottom=s+"px solid "+(pt.color||"#f97316");
+      m.appendChild(pin);
+
+      const lbl=document.createElement("div");
+      lbl.className="ceph-label";
+      lbl.textContent=pt.id;
+      m.appendChild(lbl);
+
+      if (typeof pt.x_px==="number" && typeof pt.y_px==="number"){
+        m.dataset.initPlaced="1";
+        m.dataset.left=pt.x_px;
+        m.dataset.top=pt.y_px;
+      } else if (typeof pt.x==="number" && typeof pt.y==="number") {
+        m.dataset.initPlaced="1";
+        m.dataset.left=pt.x;
+        m.dataset.top=pt.y;
+      } else {
+        if (typeof pt.ratio_x==="number") m.dataset.ratioX=pt.ratio_x;
+        if (typeof pt.ratio_y==="number") m.dataset.ratioY=pt.ratio_y;
+        m.dataset.initPlaced="0";
+      }
+
+      stage.appendChild(m);
+      markerById[pt.id]=m;
+      markers.push(m);
+
+      m.addEventListener("pointerdown",(ev)=>{
+        if(ev.pointerType==="touch"){
+          activeTouches.add(ev.pointerId);
+          if(globalTouches.size>=2){
+            activeTouches.delete(ev.pointerId);
+            return;
+          }
+        }else{
+          m.setPointerCapture?.(ev.pointerId);
+        }
+        activePointerId = ev.pointerId;
+        const rect=stage.getBoundingClientRect();
+        const left=parseFloat(m.dataset.left||"0"), top=parseFloat(m.dataset.top||"0");
+        dragOffset={x:ev.clientX-(rect.left+left), y:ev.clientY-(rect.top+top)};
+        activeMarker=m;
+        m.classList.add("dragging");
+        emitState("marker_pointerdown", m.dataset.id);
+      });
+
+      m.addEventListener("pointermove",(ev)=>{
+        if(ev.pointerType==="touch" && globalTouches.size>=2){
+          if(activeMarker===m){
+            if(activePointerId!=null){
+              try{ m.releasePointerCapture?.(activePointerId); }catch(e){}
+            }
+            m.classList.remove("dragging");
+            activeMarker=null;
+            activePointerId=null;
+          }
           return;
-        }}
-
-        const showLabels = payload.showLabels !== false;
-        const defaultSize = payload.markerSize || 28;
-        const frameId = window.frameElement ? window.frameElement.id : "streamlit-frame";
-
-        const postMessage = (payload) => {{
-          if (!window.parent) {{
-            return;
-          }}
-          window.parent.postMessage(
-            {{
-              isStreamlitMessage: true,
-              id: frameId,
-              ...payload,
-            }},
-            "*"
-          );
-        }};
-
-        const emitValue = (value) => {{
-          postMessage({{
-            type: "streamlit:setComponentValue",
-            value,
-          }});
-        }};
-
-        const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
-        const markers = [];
-        const markerById = {{}};
-        const dragOffset = {{ x: 0, y: 0 }};
-        let activeMarker = null;
-
-        const planeDefs = Array.isArray(payload.planes) ? payload.planes : [];
-        const planeLines = [];
-
-        const setPosition = (marker, left, top) => {{
-          const width = stage.clientWidth || 1;
-          const height = stage.clientHeight || 1;
-          const clampedLeft = clamp(left, 0, width);
-          const clampedTop = clamp(top, 0, height);
-          marker.style.left = `${{clampedLeft}}px`;
-          marker.style.top = `${{clampedTop}}px`;
-          marker.dataset.left = String(clampedLeft);
-          marker.dataset.top = String(clampedTop);
-          marker.dataset.ratioX = width ? clampedLeft / width : 0;
-          marker.dataset.ratioY = height ? clampedTop / height : 0;
-          updateMarkerLabel(marker);
-        }};
-
-        const setFromRatios = (marker) => {{
-          const width = stage.clientWidth || 1;
-          const height = stage.clientHeight || 1;
-          const ratioX = parseFloat(marker.dataset.ratioX || "0.5");
-          const ratioY = parseFloat(marker.dataset.ratioY || "0.5");
-          setPosition(marker, ratioX * width, ratioY * height);
-        }};
-
-        const emitState = (eventType, activeId) => {{
-          const width = Math.round(stage.clientWidth || 0);
-          const height = Math.round(stage.clientHeight || 0);
-          const points = markers.map((marker) => ({{
-            id: marker.dataset.id,
-            label: marker.dataset.label,
-            x_px: parseFloat(marker.dataset.left || "0"),
-            y_px: parseFloat(marker.dataset.top || "0"),
-            x_ratio: parseFloat(marker.dataset.ratioX || "0"),
-            y_ratio: parseFloat(marker.dataset.ratioY || "0"),
-          }}));
-          emitValue({{
-            event: eventType,
-            active_id: activeId || null,
-            stage: {{ width, height }},
-            points,
-          }});
-        }};
-
-        const updatePlanes = () => {{
-          if (!planesSvg) {{
-            return;
-          }}
-          const width = stage.clientWidth || 0;
-          const height = stage.clientHeight || 0;
-          planesSvg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
-          planesSvg.setAttribute("width", width);
-          planesSvg.setAttribute("height", height);
-          planeLines.forEach((entry) => {{
-            const plane = entry.plane;
-            const line = entry.line;
-            const startMarker = markerById[plane.start];
-            const endMarker = markerById[plane.end];
-            if (!startMarker || !endMarker) {{
-              line.style.opacity = 0;
-              return;
-            }}
-            line.style.opacity = 1;
-            line.setAttribute("x1", startMarker.dataset.left || "0");
-            line.setAttribute("y1", startMarker.dataset.top || "0");
-            line.setAttribute("x2", endMarker.dataset.left || "0");
-            line.setAttribute("y2", endMarker.dataset.top || "0");
-          }});
-        }};
-
-        const updateMarkerLabel = (marker) => {{
-          if (!showLabels) {{
-            return;
-          }}
-          const labelEl = marker.querySelector(".label");
-          if (!labelEl) {{
-            return;
-          }}
-          const baseLabel = marker.dataset.baseLabel || marker.dataset.id || "";
-          const x = Math.round(parseFloat(marker.dataset.left || "0"));
-          const y = Math.round(parseFloat(marker.dataset.top || "0"));
-          labelEl.textContent = `${{baseLabel}} (${{x}}, ${{y}})`;
-        }};
-
-        const xy = (marker) => {{
-          if (!marker) {{
-            return null;
-          }}
-          return {{
-            x: parseFloat(marker.dataset.left || "0"),
-            y: parseFloat(marker.dataset.top || "0"),
-          }};
-        }};
-
-        const computeAngleDeg = (pairA, pairB) => {{
-          const a1 = markerById[pairA[0]];
-          const a2 = markerById[pairA[1]];
-          const b1 = markerById[pairB[0]];
-          const b2 = markerById[pairB[1]];
-          if (!a1 || !a2 || !b1 || !b2) {{
-            return null;
-          }}
-          const A1 = xy(a1);
-          const A2 = xy(a2);
-          const B1 = xy(b1);
-          const B2 = xy(b2);
-          const vecA = {{ x: A1.x - A2.x, y: A1.y - A2.y }};
-          const vecB = {{ x: B1.x - B2.x, y: B1.y - B2.y }};
-          const denom = Math.hypot(vecA.x, vecA.y) * Math.hypot(vecB.x, vecB.y);
-          if (!denom) {{
-            return null;
-          }}
-          const dot = vecA.x * vecB.x + vecA.y * vecB.y;
-          const ratio = Math.min(1, Math.max(-1, dot / denom));
-          return (Math.acos(ratio) * 180) / Math.PI;
-        }};
-
-        const updateAngleStack = () => {{
-          const angleValues = new Map();
-          ANGLE_CONFIG.forEach((config) => {{
-            const entry = angleRowMap[config.id];
-            if (!entry) {{
-              return;
-            }}
-            let value = null;
-            if (config.type === "angle") {{
-              value = computeAngleDeg(config.vectors[0], config.vectors[1]);
-            }} else if (config.type === "difference") {{
-              const minuend = angleValues.get(config.minuend);
-              const subtrahend = angleValues.get(config.subtrahend);
-              if (minuend != null && !Number.isNaN(minuend) && subtrahend != null && !Number.isNaN(subtrahend)) {{
-                value = minuend - subtrahend;
-              }}
-            }}
-            if (value === null || Number.isNaN(value)) {{
-              entry.row.classList.add("dimmed");
-              entry.valueEl.textContent = "--.-°";
-            }} else {{
-              entry.row.classList.remove("dimmed");
-              entry.valueEl.textContent = `${{value.toFixed(1)}}°`;
-            }}
-            angleValues.set(config.id, value);
-          }});
-        }};
-
-        const createMarker = (pt) => {{
-          const marker = document.createElement("div");
-          marker.className = "ceph-marker";
-          marker.dataset.id = pt.id;
-          marker.dataset.label = pt.label || pt.id;
-          marker.dataset.baseLabel = pt.label || pt.id;
-          marker.dataset.ratioX = typeof pt.ratio_x === "number" ? pt.ratio_x : 0.5;
-          marker.dataset.ratioY = typeof pt.ratio_y === "number" ? pt.ratio_y : 0.5;
-          marker.dataset.size = pt.size || defaultSize;
-
-          const pin = document.createElement("div");
-          pin.className = "pin";
-          const size = parseFloat(marker.dataset.size || defaultSize);
-          pin.style.borderLeft = `${{size / 2}}px solid transparent`;
-          pin.style.borderRight = `${{size / 2}}px solid transparent`;
-          pin.style.borderBottom = `${{size}}px solid ${{pt.color || "#f97316"}}`;
-          marker.appendChild(pin);
-
-          if (showLabels) {{
-            const label = document.createElement("div");
-            label.className = "label";
-            marker.appendChild(label);
-          }}
-
-          stage.appendChild(marker);
-          markers.push(marker);
-          markerById[pt.id] = marker;
-
-          marker.addEventListener("pointerdown", (event) => {{
-            const stageRect = stage.getBoundingClientRect();
-            const left = parseFloat(marker.dataset.left || "0");
-            const top = parseFloat(marker.dataset.top || "0");
-            dragOffset.x = event.clientX - (stageRect.left + left);
-            dragOffset.y = event.clientY - (stageRect.top + top);
-            activeMarker = marker;
-            marker.classList.add("dragging");
-            emitState("pointerdown", marker.dataset.id);
-            event.preventDefault();
-          }});
-
-          marker.addEventListener("pointermove", (event) => {{
-            if (activeMarker !== marker) {{
-              return;
-            }}
-            const stageRect = stage.getBoundingClientRect();
-            const newLeft = event.clientX - stageRect.left - dragOffset.x;
-            const newTop = event.clientY - stageRect.top - dragOffset.y;
-            setPosition(marker, newLeft, newTop);
-            updatePlanes();
-            updateAngleStack();
-            emitState("pointermove", marker.dataset.id);
-          }});
-
-          const finish = (eventType) => {{
-            if (activeMarker !== marker) {{
-              return;
-            }}
-            marker.classList.remove("dragging");
-            activeMarker = null;
-            updateAngleStack();
-            emitState(eventType, marker.dataset.id);
-            updatePlanes();
-          }};
-
-          marker.addEventListener("pointerup", () => finish("pointerup"));
-          marker.addEventListener("pointercancel", () => finish("pointercancel"));
-
-          return marker;
-        }};
-
-        const initPlanes = () => {{
-          planesSvg.innerHTML = "";
-          planeLines.length = 0;
-          planeDefs.forEach((plane) => {{
-            const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-            line.setAttribute("stroke", plane.color || "#f97316");
-            line.setAttribute("stroke-width", String(plane.width || 2));
-            if (plane.dash) {{
-              line.setAttribute("stroke-dasharray", plane.dash);
-            }}
-            planesSvg.appendChild(line);
-            planeLines.push({{ plane, line }});
-          }});
-        }};
-
-        const updateLayout = () => {{
-          const width = image.clientWidth;
-          const height = image.clientHeight;
-          stage.style.width = `${{width}}px`;
-          stage.style.height = `${{height}}px`;
-          initPlanes();
-          markers.forEach((marker) => setFromRatios(marker));
-          updatePlanes();
-          updateAngleStack();
-          coords.textContent = `ステージサイズ: ${{width}} × ${{height}}`;
-        }};
-
-        payload.points.forEach((pt) => createMarker(pt));
-        initPlanes();
+        }
+        if(activeMarker!==m) return;
+        if(ev.pointerType==="touch" && ev.cancelable) ev.preventDefault();
+        const rect=stage.getBoundingClientRect();
+        setPosition(m, ev.clientX-rect.left-dragOffset.x, ev.clientY-rect.top-dragOffset.y);
         updatePlanes();
         updateAngleStack();
-        coords.textContent = "ポイントをドラッグして位置調整";
+        redrawPolygon();
+        updateCoordStack();
+        emitState("marker_dragging", m.dataset.id);
+      });
 
-        window.addEventListener("pointerup", () => {{
-          if (activeMarker) {{
-            activeMarker.classList.remove("dragging");
-            activeMarker = null;
-            updateAngleStack();
-            emitState("pointerup", null);
-          }}
-        }});
-        window.addEventListener("pointercancel", () => {{
-          if (activeMarker) {{
-            activeMarker.classList.remove("dragging");
-            activeMarker = null;
-            updateAngleStack();
-            emitState("pointercancel", null);
-          }}
-        }});
-        window.addEventListener("resize", () => {
-          drawFacialOverlay();{
-          updateLayout();
-        drawFacialOverlay();
-          coords.textContent = "レイアウトを再調整しました。";
-        }});
+      const finish=(ev)=>{
+        if(ev.pointerType==="touch"){
+          activeTouches.delete(ev.pointerId);
+        }
+        if(activeMarker!==m) return;
+        if(activePointerId!=null){
+          try{ m.releasePointerCapture?.(activePointerId); }catch(e){}
+        }
+        activePointerId=null;
+        m.classList.remove("dragging");
+        activeMarker=null;
+        updatePlanes();
+        updateAngleStack();
+        redrawPolygon();
+        updateCoordStack();
+        emitState("marker_release", m.dataset.id);
+      };
+      m.addEventListener("pointerup", finish);
+      m.addEventListener("pointercancel", finish);
+    }
 
-        const ensureReady = () => {{
-          if (image.complete && image.naturalWidth) {{
-            updateLayout();
-        drawFacialOverlay();
-            updateAngleStack();
-          }} else {{
-            image.addEventListener("load", () => {{
-              updateLayout();
-        drawFacialOverlay();
-              updateAngleStack();
-            }}, {{ once: true }});
-          }}
-        }};
+    function placeInitMarkersOnce(){
+      const w=stage.clientWidth||0;
+      const h=stage.clientHeight||0;
+      markers.forEach(m=>{
+        if(m.dataset.initPlaced==="1"){
+          setPosition(m, parseFloat(m.dataset.left||"100"), parseFloat(m.dataset.top||"100"));
+          return;
+        }
+        const rx=(m.dataset.ratioX!==undefined)?parseFloat(m.dataset.ratioX):0.5;
+        const ry=(m.dataset.ratioY!==undefined)?parseFloat(m.dataset.ratioY):0.5;
+        setPosition(m, rx*w, ry*h);
+        m.dataset.initPlaced="1";
+        delete m.dataset.ratioX;
+        delete m.dataset.ratioY;
+      });
+    }
 
-        ensureReady();
-        emitState("init", null);
-      }})();
-    </script>
+    function initPlanes(){
+      planesSvg.innerHTML="";
+      planeLines.length=0;
+      planeDefs.forEach(pl=>{
+        const line=document.createElementNS("http://www.w3.org/2000/svg","line");
+        line.setAttribute("stroke",pl.color||"#f97316");
+        line.setAttribute("stroke-width", String(pl.width||2));
+        if(pl.dash) line.setAttribute("stroke-dasharray", pl.dash);
+        planesSvg.appendChild(line);
+        planeLines.push({plane:pl,line});
+      });
+    }
+
+    function updatePlanes(){
+      const w=stage.clientWidth||0;
+      const h=stage.clientHeight||0;
+      planesSvg.setAttribute("viewBox","0 0 "+w+" "+h);
+      planesSvg.setAttribute("width", w);
+      planesSvg.setAttribute("height", h);
+      planeLines.forEach(({plane:pl,line})=>{
+        const s=markerById[pl.start], e=markerById[pl.end];
+        if(!s||!e){
+          line.style.opacity=0;
+          return;
+        }
+        line.style.opacity=1;
+        line.setAttribute("x1", s.dataset.left||"0");
+        line.setAttribute("y1", s.dataset.top||"0");
+        line.setAttribute("x2", e.dataset.left||"0");
+        line.setAttribute("y2", e.dataset.top||"0");
+      });
+    }
+
+    function measureRowCentersMap(){
+      const wrapRect = wrapper.getBoundingClientRect();
+      const map = new Map();
+      ANGLE_CONFIG.forEach(cfg=>{
+        const entry=angleRowMap[cfg.id];
+        if(!entry) return;
+        const r = entry.row.getBoundingClientRect();
+        map.set(cfg.id, (r.top + r.height/2) - wrapRect.top);
+      });
+      return map;
+    }
+
+    function redrawPolygon(){
+      if(!overlaySvg) return;
+      const w=image.clientWidth||800;
+      const h=image.clientHeight||600;
+      overlaySvg.setAttribute("viewBox","0 0 "+w+" "+h);
+      const offsetX = Math.round(w*0.20) + 60;
+
+      const centersMap = measureRowCentersMap();
+      const ys = new Array(POLYGON_ROWS.length).fill(null);
+
+      for(let i=0;i<POLYGON_ROWS.length;i++){
+        const label = POLYGON_ROWS[i][0];
+        if(label==="00"||label==="01"||label==="ZZ"||label==="VTOP"||label==="VBOT") continue;
+        const cy = centersMap.get(label);
+        if (typeof cy === "number") ys[i] = cy;
+      }
+      for(let i=0;i<ys.length;i++){
+        if(ys[i]==null){
+          let prev=null,next=null;
+          for(let p=i-1;p>=0;p--){
+            if(ys[p]!=null){ prev=ys[p]; break; }
+          }
+          for(let n=i+1;n<POLYGON_ROWS.length;n++){
+            if(ys[n]!=null){ next=ys[n]; break; }
+          }
+          if(prev!=null && next!=null) ys[i]=(prev+next)/2;
+          else if(prev!=null) ys[i]=prev+40;
+          else if(next!=null) ys[i]=next-40;
+          else ys[i]=Math.round(h*0.1);
+        }
+      }
+
+      const gaps=[];
+      for(let i=1;i<ys.length;i++) gaps.push(Math.abs(ys[i]-ys[i-1]));
+      const median = gaps.length? gaps.sort((a,b)=>a-b)[Math.floor(gaps.length/2)] : 24;
+      const unit = Math.max(14, Math.round(median));
+
+      const idxVTOP = POLYGON_ROWS.findIndex(r=>r[0]==="VTOP");
+      const idxVBOT = POLYGON_ROWS.findIndex(r=>r[0]==="VBOT");
+      let firstRealY=null, lastRealY=null;
+      for(let i=0;i<POLYGON_ROWS.length;i++){
+        const lb=POLYGON_ROWS[i][0];
+        if(lb!=="00"&&lb!=="01"&&lb!=="ZZ"&&lb!=="VTOP"&&lb!=="VBOT"){
+          firstRealY = ys[i];
+          break;
+        }
+      }
+      for(let i=POLYGON_ROWS.length-1;i>=0;i--){
+        const lb=POLYGON_ROWS[i][0];
+        if(lb!=="00"&&lb!=="01"&&lb!=="ZZ"&&lb!=="VTOP"&&lb!=="VBOT"){
+          lastRealY = ys[i];
+          break;
+        }
+      }
+      if(idxVTOP>=0 && firstRealY!=null) ys[idxVTOP] = firstRealY - unit;
+      if(idxVBOT>=0 && lastRealY!=null) ys[idxVBOT] = lastRealY + unit;
+
+      const yInt = ys.map(v=>Math.round(v));
+      const offsetXInt = Math.round(offsetX);
+
+      const spread = row => (row[3] * SD_BASE * POLY_WIDTH_SCALE * unit);
+      const leftXs  = POLYGON_ROWS.map(row => Math.round(offsetX - spread(row)));
+      const rightXs = POLYGON_ROWS.map(row => Math.round(offsetX + spread(row)));
+
+      overlaySvg.innerHTML="";
+      const g=document.createElementNS("http://www.w3.org/2000/svg","g");
+      overlaySvg.appendChild(g);
+
+      const pts=[];
+      for(let i=0;i<POLYGON_ROWS.length;i++) pts.push(leftXs[i]+","+yInt[i]);
+      for(let i=POLYGON_ROWS.length-1;i>=0;i--) pts.push(rightXs[i]+","+yInt[i]);
+      const poly=document.createElementNS("http://www.w3.org/2000/svg","polygon");
+      poly.setAttribute("id","std-poly-outline");
+      poly.setAttribute("points", pts.join(" "));
+      g.appendChild(poly);
+
+      const center=document.createElementNS("http://www.w3.org/2000/svg","line");
+      center.setAttribute("x1",offsetXInt);
+      center.setAttribute("x2",offsetXInt);
+      center.setAttribute("y1",yInt[0]);
+      center.setAttribute("y2",yInt[yInt.length-1]);
+      center.setAttribute("class","std-centerline");
+      g.appendChild(center);
+
+      POLYGON_ROWS.forEach((row,i)=>{
+        const label=row[0];
+        if(label==="00"||label==="01"||label==="ZZ"||label==="VTOP"||label==="VBOT") return;
+        const hl=document.createElementNS("http://www.w3.org/2000/svg","line");
+        hl.setAttribute("x1", String(leftXs[i]));
+        hl.setAttribute("x2", String(rightXs[i]));
+        hl.setAttribute("y1", String(yInt[i]));
+        hl.setAttribute("y2", String(yInt[i]));
+        hl.setAttribute("class","std-hline");
+        g.appendChild(hl);
+      });
+
+      const patientPts=[];
+      if(idxVTOP>=0) patientPts.push([offsetXInt, yInt[idxVTOP]]);
+      POLYGON_ROWS.forEach((row,i)=>{
+        const label=row[0];
+        if(label==="00"||label==="01"||label==="ZZ"||label==="VTOP"||label==="VBOT") return;
+        const mean=row[1], sd=row[2], ratio=row[3];
+        const val = angleCurrent.get(label);
+        if(!sd || !ratio || val==null || !isFinite(val)) return;
+        const sd_px = ratio * SD_BASE * POLY_WIDTH_SCALE * unit;
+        const x = Math.round(offsetX + ((val-mean)/sd) * sd_px);
+        patientPts.push([x, yInt[i]]);
+      });
+      if(idxVBOT>=0) patientPts.push([offsetXInt, yInt[idxVBOT]]);
+      if(patientPts.length>=2){
+        const pl=document.createElementNS("http://www.w3.org/2000/svg","polyline");
+        pl.setAttribute("class","std-patient");
+        pl.setAttribute("points", patientPts.map(p=>p[0]+","+p[1]).join(" "));
+        g.appendChild(pl);
+      }
+    }
+
+    function updateLayout(){
+      const w=image.clientWidth||0;
+      const h=image.clientHeight||0;
+      stage.style.width=w+"px";
+      stage.style.height=h+"px";
+      syncAngleStackScale();
+      placeInitMarkersOnce();
+      initPlanes();
+      updatePlanes();
+      updateAngleStack();
+      redrawPolygon();
+      updateCoordStack();
+      emitState("layout_update", null);
+    }
+
+    window.addEventListener("pointerup", (ev)=>{
+      if(ev.pointerType==="touch"){
+        activeTouches.delete(ev.pointerId);
+        globalTouches.delete(ev.pointerId);
+        updateStagePointerState();
+      }
+      if(activeMarker){
+        activeMarker.classList.remove("dragging");
+        activeMarker=null;
+        activePointerId=null;
+        updatePlanes();
+        updateAngleStack();
+        redrawPolygon();
+        updateCoordStack();
+        emitState("marker_release", null);
+      }
+    });
+
+    window.addEventListener("pointercancel", (ev)=>{
+      if(ev.pointerType==="touch"){
+        activeTouches.delete(ev.pointerId);
+        globalTouches.delete(ev.pointerId);
+        updateStagePointerState();
+      }
+      if(activeMarker){
+        activeMarker.classList.remove("dragging");
+        activeMarker=null;
+        activePointerId=null;
+        updatePlanes();
+        updateAngleStack();
+        redrawPolygon();
+        updateCoordStack();
+        emitState("marker_release", null);
+      }
+    });
+
+    (payload.points||[]).forEach(pt=>createMarker(pt));
+    if (image.complete && image.naturalWidth){
+      updateLayout();
+    }else{
+      image.addEventListener("load", updateLayout, {once:true});
+    }
+    window.addEventListener("resize", updateLayout);
+  })();
+</script>
     """
-    
-    # --- substitute tokens safely (no f-strings / no .format on HTML) ---
+
     html = html.replace("__IMAGE_DATA_URL__", image_data_url)
-    html = html.replace("__PAYLOAD_JSON__", payload_json)
     html = html.replace("__ANGLE_ROWS_HTML__", angle_rows_html)
     html = html.replace("__ANGLE_CONFIG_JSON__", json.dumps(ANGLE_STACK_CONFIG))
-return components.html(html, height=1100, scrolling=False)
+    html = html.replace("__POLY_ROWS_JSON__", json.dumps(POLYGON_ROWS))
+    html = html.replace("__SD_BASE__", json.dumps(SD_BASE))
+    html = html.replace("__POLY_WIDTH_SCALE__", json.dumps(POLY_WIDTH_SCALE))
+    html = html.replace("__ANGLE_STACK_BASE_WIDTH__", json.dumps(ANGLE_STACK_BASE_WIDTH))
+    html = html.replace("__PAYLOAD_JSON__", payload_json)
+
+    return components.html(html, height=1100, scrolling=True)
 
 
-def main() -> None:
-    """CEF03 のワークフローを再利用して角度スタックを有効化する。"""
-    base.render_ceph_component = render_ceph_component
-    base.main()
+def slim_main():
+    base.ensure_session_state()
+    if not st.session_state.get("default_image_data_url"):
+        st.session_state.default_image_data_url = DEFAULT_PLACEHOLDER_DATA_URL
+
+    st.markdown(
+        """
+<style>
+html, body, #root, .stApp {
+  touch-action: auto !important;
+  -ms-touch-action: auto !important;
+}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("### 画像の選択")
+    uploaded = st.file_uploader(
+        "分析したいレントゲン画像をアップロードしてください。",
+        type=["png", "jpg", "jpeg", "gif", "webp"],
+    )
+
+    if uploaded is not None:
+        image_bytes = uploaded.read()
+        mime = uploaded.type or "image/png"
+        image_data_url = base.to_data_url(image_bytes, mime)
+        st.session_state.default_image_data_url = image_data_url
+    else:
+        image_data_url = st.session_state.default_image_data_url
+
+    if not image_data_url:
+        st.error("表示画像をuploadしてください。")
+        return
+
+    component_value = render_ceph_component(
+        image_data_url=image_data_url,
+        marker_size=26,
+        show_labels=True,
+        point_state=st.session_state.ceph_points,
+    )
+    if isinstance(component_value, dict):
+        base.update_state_from_component(component_value)
+
+
+def main():
+    slim_main()
 
 
 if __name__ == "__main__":
