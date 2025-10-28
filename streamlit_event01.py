@@ -1,7 +1,7 @@
-# CEF53.py
+# CEF52.py
 """
-CEF52 のロジックをベースに、iPhone でページ全体のピンチズームを通しつつ
-1 本指ドラッグでマーカー操作がスムーズに動作するよう調整したバージョン。
+iPhone でページ全体のピンチズームを有効にしつつ、
+従来の CEF46 ベースの描画・ドラッグ機能を維持したバージョン。
 """
 
 import json
@@ -27,7 +27,7 @@ ANGLE_STACK_CONFIG = [
     {"id": "SNP", "label": "SNP", "type": "angle", "vectors": [["N", "Pog"], ["N", "S"]]},
     {"id": "SNA", "label": "SNA", "type": "angle", "vectors": [["N", "A"], ["N", "S"]]},
     {"id": "SNB", "label": "SNB", "type": "angle", "vectors": [["N", "B"], ["N", "S"]]},
-    {"id": "SNA-SNB diff", "label": "SNA·SNB diff", "type": "difference", "minuend": "SNA", "subtrahend": "SNB"},
+    {"id": "SNA-SNB diff", "label": "SNA - SNB", "type": "difference", "minuend": "SNA", "subtrahend": "SNB"},
     {"id": "Interincisal", "label": "Interincisal", "type": "angle", "vectors": [["U1", "U1r"], ["L1", "L1r"]]},
     {"id": "U1 to FH plane", "label": "U1 - FH plane", "type": "angle", "vectors": [["U1", "U1r"], ["Po", "Or"]]},
     {"id": "L1 to Mandibular", "label": "L1 - Mandibular", "type": "angle", "vectors": [["Me", "Am"], ["L1", "L1r"]]},
@@ -111,6 +111,9 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
   .std-patient{stroke:#ef4444;stroke-width:2;fill:none;}
 
   .ceph-marker{position:absolute;transform:translate(-50%,0);cursor:grab;}
+  .ceph-marker.dragging{cursor:grabbing;}
+  .ceph-marker .pin{width:0;height:0;margin:0 auto;}
+  .ceph-label{margin-top:2px;font-size:11px;font-weight:700;color:#f8fafc;text-shadow:0 1px 2px rgba(0,0,0,.6);text-align:center;}
 </style>
 
 <div class="ceph-wrapper">
@@ -226,7 +229,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           if(a!=null && b!=null) v=a-b;
         }
         if(cfg.id==="Convexity" && v!=null) v=180-v;
-        if(v==null or Number.isNaN(v)){
+        if(v==null || Number.isNaN(v)){
           entry.row.classList.add("dimmed");
           entry.valueEl.textContent="--.-°";
           angleCurrent.set(cfg.id,null);
@@ -262,19 +265,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       m.dataset.ratioY = h ? (ct / h) : 0;
     }
 
-    const applyTouchMode = ()=>{
-      if(globalTouches.size>=2){
-        stage.style.touchAction='auto';
-        wrapper.style.touchAction='auto';
-      }else if(globalTouches.size===1){
-        stage.style.touchAction='none';
-        wrapper.style.touchAction='none';
-      }else{
-        stage.style.touchAction='auto';
-        wrapper.style.touchAction='auto';
-      }
-    };
-
     const updateStagePointerState = ()=>{
       if(globalTouches.size>=2){
         if(!stagePointerDisabled){
@@ -289,27 +279,22 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       }
     };
 
-    applyTouchMode();
-
     window.addEventListener("pointerdown",(ev)=>{
       if(ev.pointerType==="touch"){
         globalTouches.add(ev.pointerId);
         updateStagePointerState();
-        applyTouchMode();
       }
     }, true);
     window.addEventListener("pointerup",(ev)=>{
       if(ev.pointerType==="touch"){
         globalTouches.delete(ev.pointerId);
         updateStagePointerState();
-        applyTouchMode();
       }
     }, true);
     window.addEventListener("pointercancel",(ev)=>{
       if(ev.pointerType==="touch"){
         globalTouches.delete(ev.pointerId);
         updateStagePointerState();
-        applyTouchMode();
       }
     }, true);
 
@@ -395,9 +380,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       const finish=(ev)=>{
         if(ev.pointerType==="touch"){
           activeTouches.delete(ev.pointerId);
-          globalTouches.delete(ev.pointerId);
-          updateStagePointerState();
-          applyTouchMode();
         }
         if(activeMarker!==m) return;
         if(activePointerId!=null){
@@ -449,7 +431,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
     function updatePlanes(){
       const w=stage.clientWidth||0;
       const h=stage.clientHeight||0;
-      planesSvg.setAttribute("viewBox","0 0 "+w+" "+h");
+      planesSvg.setAttribute("viewBox","0 0 "+w+" "+h);
       planesSvg.setAttribute("width", w);
       planesSvg.setAttribute("height", h);
       planeLines.forEach(({plane:pl,line})=>{
@@ -533,7 +515,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         }
       }
       if(idxVTOP>=0 && firstRealY!=null) ys[idxVTOP] = firstRealY - unit;
-      if(idxVBOT>=0 and lastRealY!=null) ys[idxVBOT] = lastRealY + unit;
+      if(idxVBOT>=0 && lastRealY!=null) ys[idxVBOT] = lastRealY + unit;
 
       const yInt = ys.map(v=>Math.round(v));
       const offsetXInt = Math.round(offsetX);
@@ -615,7 +597,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         activeTouches.delete(ev.pointerId);
         globalTouches.delete(ev.pointerId);
         updateStagePointerState();
-        applyTouchMode();
       }
       if(activeMarker){
         activeMarker.classList.remove("dragging");
@@ -625,4 +606,99 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         updateAngleStack();
         redrawPolygon();
         updateCoordStack();
-        emit
+        emitState("marker_release", null);
+      }
+    });
+
+    window.addEventListener("pointercancel", (ev)=>{
+      if(ev.pointerType==="touch"){
+        activeTouches.delete(ev.pointerId);
+        globalTouches.delete(ev.pointerId);
+        updateStagePointerState();
+      }
+      if(activeMarker){
+        activeMarker.classList.remove("dragging");
+        activeMarker=null;
+        activePointerId=null;
+        updatePlanes();
+        updateAngleStack();
+        redrawPolygon();
+        updateCoordStack();
+        emitState("marker_release", null);
+      }
+    });
+
+    (payload.points||[]).forEach(pt=>createMarker(pt));
+    if (image.complete && image.naturalWidth){
+      updateLayout();
+    }else{
+      image.addEventListener("load", updateLayout, {once:true});
+    }
+    window.addEventListener("resize", updateLayout);
+  })();
+</script>
+    """
+
+    html = html.replace("__IMAGE_DATA_URL__", image_data_url)
+    html = html.replace("__ANGLE_ROWS_HTML__", angle_rows_html)
+    html = html.replace("__ANGLE_CONFIG_JSON__", json.dumps(ANGLE_STACK_CONFIG))
+    html = html.replace("__POLY_ROWS_JSON__", json.dumps(POLYGON_ROWS))
+    html = html.replace("__SD_BASE__", json.dumps(SD_BASE))
+    html = html.replace("__POLY_WIDTH_SCALE__", json.dumps(POLY_WIDTH_SCALE))
+    html = html.replace("__ANGLE_STACK_BASE_WIDTH__", json.dumps(ANGLE_STACK_BASE_WIDTH))
+    html = html.replace("__PAYLOAD_JSON__", payload_json)
+
+    return components.html(html, height=1100, scrolling=True)
+
+
+def slim_main():
+    base.ensure_session_state()
+    if not st.session_state.get("default_image_data_url"):
+        st.session_state.default_image_data_url = DEFAULT_PLACEHOLDER_DATA_URL
+
+    st.markdown(
+        """
+<style>
+html, body, #root, .stApp {
+  touch-action: auto !important;
+  -ms-touch-action: auto !important;
+}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("### 画像の選択")
+    uploaded = st.file_uploader(
+        "分析したいレントゲン画像をアップロードしてください。",
+        type=["png", "jpg", "jpeg", "gif", "webp"],
+    )
+
+    if uploaded is not None:
+        image_bytes = uploaded.read()
+        mime = uploaded.type or "image/png"
+        image_data_url = base.to_data_url(image_bytes, mime)
+        st.session_state.default_image_data_url = image_data_url
+    else:
+        image_data_url = st.session_state.default_image_data_url
+
+    if not image_data_url:
+        st.error("表示画像をuploadしてください。")
+        return
+
+    component_value = render_ceph_component(
+        image_data_url=image_data_url,
+        marker_size=26,
+        show_labels=True,
+        point_state=st.session_state.ceph_points,
+    )
+    if isinstance(component_value, dict):
+        base.update_state_from_component(component_value)
+
+
+def main():
+    slim_main()
+
+
+if __name__ == "__main__":
+    main()
