@@ -1,8 +1,10 @@
-# CEF46.py — minimal fixes:
-# - centerline & patient endpoints use the SAME rounded coords as polygon apex  // ★
-# - smoother iPhone drag via setPointerCapture / releasePointerCapture          // ★
-# - remove preventDefault on pointerdown to not hinder pinch-zoom               // ★
-# - keep everything else as-is (thin triangles, scaling, coord stack)
+# CEF46_pinch_stable.py — minimal patch for reliable iPhone pinch + stable drag
+# 変更点:
+# - (#) viewport を user-scalable=yes に（保険）                               // ★
+# - (#) .ceph-wrapper に overscroll-behavior: contain                         // ★
+# - (#) #ceph-stage の touch-action: pinch-zoom → auto                         // ★
+# - (#) タッチは setPointerCapture を使わず、2本指以上はドラッグ無効           // ★
+# - (#) releasePointerCapture の event 参照バグ修正（pointerId保持）           // ★
 
 import json
 import streamlit as st
@@ -68,19 +70,18 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
 
     html = """
     <style>
-      .ceph-wrapper{position:relative;width:min(100%,960px);margin:0 auto;}
+      .ceph-wrapper{
+        position:relative;width:min(100%,960px);margin:0 auto;
+        overscroll-behavior: contain; /* ★ ラバーバンド軽減 */
+      }
       #ceph-image{width:100%;height:auto;display:block;pointer-events:none;user-select:none;-webkit-user-select:none;}
       #ceph-planes{position:absolute;inset:0;pointer-events:none;z-index:1;}
       #ceph-overlay{position:absolute;inset:0;pointer-events:none;z-index:2;}
       #ceph-stage{
-  position:absolute;
-  inset:0;
-  pointer-events:auto;
-  z-index:3;
-  touch-action:pinch-zoom;   /* ← ★ ピンチズームを許可 */
-  -webkit-user-select:none;
-  user-select:none;
-}
+        position:absolute;inset:0;pointer-events:auto;z-index:3;
+        touch-action:auto;    /* ★ pinch-zoom → auto に変更（ブラウザに任せる） */
+        -webkit-user-select:none;user-select:none;
+      }
       #angle-stack{
         position:absolute;top:56px;left:12px;
         display:flex;flex-direction:column;gap:8px;
@@ -108,6 +109,18 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       .ceph-marker .pin{width:0;height:0;margin:0 auto;}
       .ceph-label{margin-top:2px;font-size:11px;font-weight:700;color:#f8fafc;text-shadow:0 1px 2px rgba(0,0,0,.6);text-align:center;}
     </style>
+
+    <!-- ★ 保険: ページの viewport をズーム許可に -->
+    <script>
+      (function(){
+        try{
+          let m=document.querySelector('meta[name="viewport"]');
+          const c='width=device-width, initial-scale=1, maximum-scale=5, user-scalable=yes';
+          if(m) m.setAttribute('content',c);
+          else{ m=document.createElement('meta'); m.name='viewport'; m.content=c; document.head.appendChild(m); }
+        }catch(e){}
+      })();
+    </script>
 
     <div class="ceph-wrapper">
       <img id="ceph-image" src="__IMAGE_DATA_URL__" alt="cephalometric background"/>
@@ -142,6 +155,10 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
 
         const markers=[], markerById={}, planeDefs=(payload.planes||[]), planeLines=[];
         let activeMarker=null, dragOffset={x:0,y:0};
+
+        // ★ 追加: アクティブな pointer を追跡（2本指以上ならドラッグ禁止）
+        const activePointers = new Set();
+        let capturedPointerId = null;  // ★ mouse の時だけ保持
 
         const clamp=(v,lo,hi)=>Math.min(Math.max(v,lo),hi);
         const xy = m => (!m?null:{x:parseFloat(m.dataset.left||"0"), y:parseFloat(m.dataset.top||"0")});
@@ -198,8 +215,8 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         // ===== markers (thin triangles) =====
         function setPosition(m,left,top){
           const w=stage.clientWidth||1,h=stage.clientHeight||1;
-          const cl=Math.round(clamp(left,0,w));   // ★ 整数化
-          const ct=Math.round(clamp(top,0,h));    // ★ 整数化
+          const cl=Math.round(clamp(left,0,w));
+          const ct=Math.round(clamp(top,0,h));
           m.style.left=cl+"px"; m.style.top=ct+"px"; m.dataset.left=cl; m.dataset.top=ct;
         }
         function createMarker(pt){
@@ -230,27 +247,47 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           stage.appendChild(m); markerById[pt.id]=m; markers.push(m);
 
           m.addEventListener("pointerdown",(ev)=>{
-            // ev.preventDefault(); // ★ 解除：ピンチ阻害を避ける
-            m.setPointerCapture?.(ev.pointerId);  // ★ iPhoneでのドラッグ安定
+            // preventDefault はしない（ピンチ阻害を避ける）
+            if (ev.pointerType === "touch") {
+              activePointers.add(ev.pointerId);
+              // 2本指以上 → ピンチに委ね、ドラッグ開始しない
+              if (activePointers.size >= 2) return;
+              // 単指: capture しない（iOSでピンチと競合しにくい）
+              capturedPointerId = null;
+            } else if (ev.pointerType === "mouse") {
+              m.setPointerCapture?.(ev.pointerId);
+              capturedPointerId = ev.pointerId;
+            }
+
             const rect=stage.getBoundingClientRect();
             const left=parseFloat(m.dataset.left||"0"), top=parseFloat(m.dataset.top||"0");
             dragOffset={x:ev.clientX-(rect.left+left), y:ev.clientY-(rect.top+top)};
             activeMarker=m; m.classList.add("dragging");
-          });
+          }, {passive:true});
+
           m.addEventListener("pointermove",(ev)=>{
+            // 2本指以上が乗っている間は動かさない（＝ピンチ優先）
+            if (activePointers.size >= 2) return;
             if(activeMarker!==m) return;
             const rect=stage.getBoundingClientRect();
             setPosition(m, ev.clientX-rect.left-dragOffset.x, ev.clientY-rect.top-dragOffset.y);
             updatePlanes(); updateAngleStack(); redrawPolygon(); updateCoordStack();
-          });
-          const finish=()=>{
+          }, {passive:true});
+
+          const finish=(ev)=>{
+            if (ev?.pointerType === "touch") {
+              activePointers.delete(ev.pointerId);
+            }
             if(activeMarker!==m) return;
-            m.releasePointerCapture?.(event?.pointerId); // ★
+            if (capturedPointerId!=null) {
+              m.releasePointerCapture?.(capturedPointerId);  // ★ event 未定義バグを修正
+              capturedPointerId = null;
+            }
             m.classList.remove("dragging"); activeMarker=null;
             updatePlanes(); updateAngleStack(); redrawPolygon(); updateCoordStack();
           };
-          m.addEventListener("pointerup", finish);
-          m.addEventListener("pointercancel", finish);
+          m.addEventListener("pointerup", finish, {passive:true});
+          m.addEventListener("pointercancel", finish, {passive:true});
         }
 
         function placeInitMarkersOnce(){
@@ -350,7 +387,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           if(idxVTOP>=0 && firstRealY!=null) ys[idxVTOP] = firstRealY - unit;
           if(idxVBOT>=0 && lastRealY!=null)  ys[idxVBOT] = lastRealY + unit;
 
-          // ★ 以降、整数座標で統一（ズレ防止）
           const yInt = ys.map(v=>Math.round(v));
           const offsetXInt = Math.round(offsetX);
 
@@ -371,18 +407,18 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
 
           const center=document.createElementNS("http://www.w3.org/2000/svg","line");
           center.setAttribute("x1",offsetXInt); center.setAttribute("x2",offsetXInt);
-          center.setAttribute("y1",yInt[0]);   center.setAttribute("y2",yInt[yInt.length-1]);  // ★
+          center.setAttribute("y1",yInt[0]);   center.setAttribute("y2",yInt[yInt.length-1]);  // 同一整数座標
           center.setAttribute("class","std-centerline"); g.appendChild(center);
 
           POLYGON_ROWS.forEach((row,i)=>{
-            const label=row[0]; if(label==="00"||label==="01"||label==="ZZ"||label==="VTOP"||label==="VBOT") return;
+            const label=row[0]; if(label==="00"||"01"||"ZZ"||"VTOP"||"VBOT") return;
             const hl=document.createElementNS("http://www.w3.org/2000/svg","line");
             hl.setAttribute("x1", String(leftXs[i])); hl.setAttribute("x2", String(rightXs[i]));
             hl.setAttribute("y1", String(yInt[i]));   hl.setAttribute("y2", String(yInt[i]));
             hl.setAttribute("class","std-hline"); g.appendChild(hl);
           });
 
-          // 患者 赤ポリライン（VTOP中心→各行→VBOT中心） — 端点も整数座標に  // ★
+          // 患者 赤ポリライン（端点も整数）
           const patientPts=[];
           if(idxVTOP>=0) patientPts.push([offsetXInt, yInt[idxVTOP]]);
           POLYGON_ROWS.forEach((row,i)=>{
@@ -391,7 +427,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             const val = angleCurrent.get(label);
             if(!sd || !ratio || val==null || !isFinite(val)) return;
             const sd_px = ratio * SD_BASE * POLY_WIDTH_SCALE * unit;
-            const x = Math.round(offsetX + ((val-mean)/sd) * sd_px);  // ★
+            const x = Math.round(offsetX + ((val-mean)/sd) * sd_px);
             patientPts.push([x, yInt[i]]);
           });
           if(idxVBOT>=0) patientPts.push([offsetXInt, yInt[idxVBOT]]);
@@ -412,14 +448,16 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           placeInitMarkersOnce(); initPlanes(); updatePlanes(); updateAngleStack(); redrawPolygon(); updateCoordStack();
         }
 
-        window.addEventListener("pointerup", ()=>{
+        window.addEventListener("pointerup", (ev)=>{
+          if (ev?.pointerType === "touch") activePointers.delete(ev.pointerId);
           if(activeMarker){ activeMarker.classList.remove("dragging"); activeMarker=null;
             updatePlanes(); updateAngleStack(); redrawPolygon(); updateCoordStack(); }
-        });
-        window.addEventListener("pointercancel", ()=>{
+        }, {passive:true});
+        window.addEventListener("pointercancel", (ev)=>{
+          if (ev?.pointerType === "touch") activePointers.delete(ev.pointerId);
           if(activeMarker){ activeMarker.classList.remove("dragging"); activeMarker=null;
             updatePlanes(); updateAngleStack(); redrawPolygon(); updateCoordStack(); }
-        });
+        }, {passive:true});
 
         (payload.points||[]).forEach(pt=>createMarker(pt));
         if (image.complete && image.naturalWidth) updateLayout();
