@@ -1,4 +1,4 @@
-# CEF46_pinch_stable.py — minimal patch for reliable iPhone pinch + stable drag
+# z01_2.py _pinch_stable.py — minimal patch for reliable iPhone pinch + stable drag
 # 変更点:
 # - (#) viewport を user-scalable=yes に（保険）                               // ★
 # - (#) .ceph-wrapper に overscroll-behavior: contain                         // ★
